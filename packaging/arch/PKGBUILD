@@ -1,0 +1,39 @@
+# Maintainer: you
+# Build from this source tree:  cd packaging/arch && makepkg -si
+pkgname=coda-ripper
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Secure CD ripper (AccurateRip verified) and multi-core audio converter"
+arch=('x86_64' 'aarch64')
+license=('GPL-3.0-or-later')
+depends=('ffmpeg' 'fontconfig' 'freetype2' 'libxkbcommon' 'wayland' 'libglvnd' 'xdg-desktop-portal')
+makedepends=('cargo')
+optdepends=('libnotify: desktop notifications for right-click conversions'
+            'xdg-desktop-portal-kde: native file dialogs on KDE Plasma'
+            'xdg-desktop-portal-gnome: native file dialogs on GNOME')
+options=('!lto')
+
+build() {
+  cd "$startdir/../.."
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --release --locked
+}
+
+check() {
+  cd "$startdir/../.."
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo test --release --locked
+}
+
+package() {
+  cd "$startdir/../.."
+  install -Dm755 "$srcdir/target/release/coda" "$pkgdir/usr/bin/coda"
+  install -Dm644 packaging/coda.desktop "$pkgdir/usr/share/applications/coda.desktop"
+  install -Dm644 packaging/coda-convert.desktop "$pkgdir/usr/share/applications/coda-convert.desktop"
+  install -Dm755 packaging/coda-servicemenu.desktop "$pkgdir/usr/share/kio/servicemenus/coda-convert.desktop"
+  for size in 16 20 22 24 32 48 64 128 256 512; do
+    install -Dm644 "assets/coda-$size.png" "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/coda.png"
+  done
+  install -Dm644 README.md "$pkgdir/usr/share/doc/coda-ripper/README.md"
+}

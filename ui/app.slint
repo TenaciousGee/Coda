@@ -1,0 +1,913 @@
+import { Button, ComboBox, LineEdit, SpinBox, ScrollView, ListView, Palette } from "std-widgets.slint";
+
+export global Theme {
+    // set from Rust: resolved light/dark (system preference or forced) and scheme index
+    in-out property <bool> dark: true;
+    in-out property <int> scheme: 0;
+
+    out property <color> bg: dark ? #0d0f14 : #f3f4f8;
+    out property <color> side: dark ? #11141b : #e9ebf2;
+    out property <color> card: dark ? #171b24 : #ffffff;
+    out property <color> card-hi: dark ? #1e2330 : #eef0f6;
+    out property <color> border: dark ? #262c3a : #dadfe9;
+    out property <color> text: dark ? #e9ecf3 : #171b26;
+    out property <color> muted: dark ? #8a93a8 : #5c6476;
+    out property <color> hover: dark ? #ffffff0c : #0000000a;
+    out property <color> toast: dark ? #262c3af2 : #ffffffF2;
+    out property <color> knob: dark ? #c9cfdb : #ffffff;
+    out property <color> ok: dark ? #39d08f : #0e9a62;
+    out property <color> info: dark ? #59b7ff : #1f74c9;
+    out property <color> warn: dark ? #f4a62a : #b26a00;
+    out property <color> bad: dark ? #f2545b : #d1343c;
+    out property <length> radius: 12px;
+
+    //                      Aurora   Ocean    Emerald  Sunset   Rose     Amber    Graphite Nord
+    out property <[color]> dark-a:  [#6d8bff, #3ba4ff, #34d399, #ff8a4c, #fb7185, #fbbf24, #a3adbd, #88c0d0];
+    out property <[color]> dark-b:  [#a970ff, #2dd4bf, #a3e635, #ff4f81, #e879f9, #fb923c, #e2e8f0, #b48ead];
+    out property <[color]> light-a: [#4c63e6, #1a78d6, #0f9d6b, #e0621f, #e11d48, #c27c00, #4b5563, #5e81ac];
+    out property <[color]> light-b: [#8a4dea, #0f9488, #5f9b13, #d9295c, #c026d3, #df6c12, #94a3b8, #b48ead];
+    // text drawn on top of the accent: dark text for the pale dark-mode accents
+    out property <[color]> dark-on:  [#ffffff, #ffffff, #04261a, #ffffff, #ffffff, #241600, #11141b, #11141b];
+
+    public pure function accent-of(i: int) -> color { return dark ? dark-a[i] : light-a[i]; }
+    public pure function accent2-of(i: int) -> color { return dark ? dark-b[i] : light-b[i]; }
+
+    out property <color> accent: accent-of(scheme);
+    out property <color> accent2: accent2-of(scheme);
+    out property <color> on-accent: dark ? dark-on[scheme] : #ffffff;
+}
+
+export struct TrackRow {
+    selected: bool,
+    number: int,
+    title: string,
+    artist: string,
+    length: string,
+    status: string,
+    progress: float,
+    // 0 idle, 1 working, 2 accurate, 3 secure/done, 4 warning, 5 error
+    state: int,
+}
+
+export struct FileRow {
+    name: string,
+    folder: string,
+    status: string,
+    progress: float,
+    state: int,
+}
+
+export struct OutputRow {
+    enabled: bool,
+    format: string,
+    modes: [string],
+    mode: string,
+    value: int,
+    value-min: int,
+    value-max: int,
+    value-label: string,
+    dest: string,
+    template: string,
+    sample-rate: string,
+    bit-depth: string,
+    stereo: bool,
+    preview: string,
+}
+
+// Switch and tick box drawn here so they follow the selected colour scheme.
+component Toggle inherits Rectangle {
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled();
+    width: 40px;
+    height: 22px;
+    border-radius: 11px;
+    opacity: enabled ? 1 : 0.45;
+    background: checked ? Theme.accent : Theme.border;
+    animate background { duration: 150ms; }
+    Rectangle {
+        y: 3px;
+        x: root.checked ? root.width - self.width - 3px : 3px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: root.checked ? Theme.on-accent : Theme.knob;
+        drop-shadow-blur: 3px;
+        drop-shadow-color: #00000040;
+        animate x { duration: 150ms; easing: ease-out; }
+    }
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled();
+        }
+    }
+}
+
+component Tick inherits Rectangle {
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    in property <string> text;
+    callback toggled();
+    opacity: enabled ? 1 : 0.45;
+    min-height: 22px;
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 18px;
+                height: 18px;
+                border-radius: 5px;
+                border-width: root.checked ? 0 : 1.5px;
+                border-color: ta.has-hover ? Theme.accent : Theme.muted;
+                background: root.checked ? Theme.accent : transparent;
+                animate background { duration: 120ms; }
+                if root.checked : Text { text: "✓"; color: Theme.on-accent; font-size: 13px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+            }
+        }
+        if root.text != "" : Text { text: root.text; color: Theme.text; vertical-alignment: center; }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled();
+        }
+    }
+}
+
+component Card inherits Rectangle {
+    background: Theme.card;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.border;
+}
+
+component Heading inherits Text {
+    color: Theme.text;
+    font-size: 22px;
+    font-weight: 700;
+}
+
+component Label inherits Text {
+    color: Theme.muted;
+    font-size: 12px;
+    vertical-alignment: center;
+}
+
+component Bar inherits Rectangle {
+    in property <float> value;
+    in property <int> state;
+    height: 6px;
+    border-radius: 3px;
+    background: Theme.border;
+    Rectangle {
+        x: 0;
+        width: parent.width * clamp(root.value, 0, 1);
+        border-radius: 3px;
+        background: root.state == 5 ? Theme.bad : root.state == 4 ? Theme.warn : root.state == 2 ? Theme.ok : @linear-gradient(90deg, Theme.accent 0%, Theme.accent2 100%);
+        animate width { duration: 180ms; }
+    }
+}
+
+component StatePill inherits Rectangle {
+    in property <int> state;
+    in property <string> text;
+    height: 22px;
+    border-radius: 11px;
+    background: state == 2 ? Theme.ok.with-alpha(0.14) : state == 3 ? Theme.info.with-alpha(0.14) : state == 4 ? Theme.warn.with-alpha(0.14) : state == 5 ? Theme.bad.with-alpha(0.14) : state == 1 ? Theme.accent.with-alpha(0.14) : Theme.hover;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: root.text;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+            color: state == 2 ? Theme.ok : state == 3 ? Theme.info : state == 4 ? Theme.warn : state == 5 ? Theme.bad : state == 1 ? Theme.accent : Theme.muted;
+        }
+    }
+}
+
+component PrimaryButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> danger: false;
+    callback clicked();
+    height: 38px;
+    min-width: 120px;
+    border-radius: 10px;
+    opacity: enabled ? 1 : 0.4;
+    background: danger ? (ta.has-hover ? Theme.bad.brighter(0.15) : Theme.bad) : ta.pressed ? Theme.accent2 : @linear-gradient(90deg, Theme.accent 0%, Theme.accent2 100%);
+    drop-shadow-blur: ta.has-hover && enabled ? 14px : 6px;
+    drop-shadow-color: danger ? Theme.bad.with-alpha(0.33) : Theme.accent.with-alpha(0.33);
+    Text {
+        text: root.text;
+        color: danger ? #ffffff : Theme.on-accent;
+        font-weight: 600;
+        font-size: 14px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component NavItem inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+    height: 44px;
+    border-radius: 10px;
+    background: active ? Theme.accent.with-alpha(0.15) : ta.has-hover ? Theme.hover : transparent;
+    HorizontalLayout {
+        padding-left: 14px;
+        spacing: 12px;
+        Text { text: root.icon; font-size: 17px; color: root.active ? Theme.accent : Theme.muted; vertical-alignment: center; width: 22px; }
+        Text { text: root.label; font-size: 14px; font-weight: root.active ? 600 : 400; color: root.active ? Theme.text : Theme.muted; vertical-alignment: center; }
+    }
+    Rectangle {
+        x: 0;
+        width: 3px;
+        height: parent.height * 0.5;
+        y: parent.height * 0.25;
+        border-radius: 2px;
+        background: root.active ? Theme.accent : transparent;
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+component SettingRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> hint;
+    spacing: 16px;
+    VerticalLayout {
+        alignment: center;
+        horizontal-stretch: 1;
+        Text { text: root.label; color: Theme.text; font-size: 13px; }
+        if root.hint != "" : Text { text: root.hint; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+    }
+    @children
+}
+
+export component AppWindow inherits Window {
+    title: "Coda";
+    icon: @image-url("../assets/coda-256.png");
+    preferred-width: 1240px;
+    preferred-height: 800px;
+    min-width: 960px;
+    min-height: 620px;
+    background: Theme.bg;
+    default-font-size: 13px;
+
+    in-out property <int> page: 0;
+    in-out property <string> toast;
+
+    // ---------------- rip
+    in property <[string]> drives;
+    in-out property <int> drive-index;
+    in property <string> drive-label;
+    in property <string> offset-text;
+    in property <string> disc-status: "Insert an audio CD";
+    in property <bool> disc-loaded;
+    in property <bool> loading;
+    in property <bool> ripping;
+    in-out property <string> album;
+    in-out property <string> album-artist;
+    in-out property <string> year;
+    in-out property <string> genre;
+    in-out property <int> disc-no: 1;
+    in-out property <int> disc-total: 1;
+    in property <[string]> releases;
+    in-out property <int> release-index;
+    in property <image> cover;
+    in property <bool> has-cover;
+    in property <string> cover-info;
+    in property <[TrackRow]> tracks;
+    in property <string> rip-status;
+    in property <float> rip-progress;
+    in property <string> ar-summary;
+    in property <string> notes;
+    in property <[string]> preset-names;
+    in-out property <int> rip-preset-index;
+    in property <string> rip-preset-summary;
+
+    callback refresh-drives();
+    callback drive-selected(int);
+    callback load-disc();
+    callback start-rip();
+    callback cancel-rip();
+    callback eject();
+    callback release-selected(int);
+    callback track-title-edited(int, string);
+    callback track-artist-edited(int, string);
+    callback track-toggled(int, bool);
+    callback select-all(bool);
+    callback choose-cover();
+    callback rip-preset-selected(int);
+
+    // ---------------- convert
+    in property <bool> drop-hover;
+    in property <[FileRow]> files;
+    in property <bool> converting;
+    in property <string> convert-status;
+    in property <float> convert-progress;
+    in-out property <int> naming-mode;
+    in-out property <bool> recursive: true;
+    in-out property <int> convert-preset-index;
+    in property <string> convert-preset-summary;
+    callback add-files();
+    callback add-folder();
+    callback clear-files();
+    callback remove-file(int);
+    callback start-convert();
+    callback cancel-convert();
+    callback convert-preset-selected(int);
+
+    // ---------------- presets
+    in-out property <int> edit-preset-index;
+    in-out property <string> edit-preset-name;
+    in property <[OutputRow]> edit-outputs;
+    in property <[string]> formats;
+    callback preset-select(int);
+    callback preset-new();
+    callback preset-duplicate();
+    callback preset-delete();
+    callback preset-save();
+    callback output-add();
+    callback output-remove(int);
+    callback output-changed(int, OutputRow);
+    callback browse-dest(int);
+
+    // ---------------- settings
+    in-out property <string> s-ffmpeg;
+    in-out property <int> s-threads;
+    in-out property <string> s-device;
+    in-out property <int> s-offset;
+    in-out property <int> s-verify-mode;
+    in-out property <int> s-retries;
+    in-out property <int> s-matches;
+    in-out property <bool> s-c2;
+    in-out property <bool> s-eject;
+    in-out property <bool> s-log;
+    in-out property <bool> s-cue;
+    in-out property <bool> s-mb;
+    in-out property <bool> s-gnudb;
+    in-out property <string> s-contact;
+    in-out property <int> s-art-max;
+    in-out property <int> s-art-min;
+    in-out property <bool> s-cover-file;
+    in-out property <string> s-cover-name;
+    in-out property <bool> s-portable;
+    in-out property <int> s-existing;
+    in-out property <bool> s-verify-lossless;
+    in property <string> ffmpeg-status;
+    in property <string> integration-status;
+    in property <int> cores;
+    callback settings-save();
+    callback lookup-offset();
+    callback detect-offset();
+    callback install-integration();
+    callback remove-integration();
+
+    // sidebar logo, rendered in Rust at the exact pixel size for the display scale
+    in property <image> logo: @image-url("../assets/coda-128.png");
+
+    // appearance
+    in-out property <int> s-theme-mode;
+    in property <[string]> scheme-names;
+    callback theme-mode-selected(int);
+    callback theme-scheme-selected(int);
+
+    // keep the std widgets (inputs, menus, buttons) in the same light/dark mode as ours
+    property <bool> theme-dark: Theme.dark;
+    changed theme-dark => { Palette.color-scheme = self.theme-dark ? ColorScheme.dark : ColorScheme.light; }
+    init => { Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light; }
+
+    HorizontalLayout {
+        // ======================================================= sidebar
+        Rectangle {
+            width: 220px;
+            background: Theme.side;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 6px;
+                HorizontalLayout {
+                    padding-bottom: 22px;
+                    padding-top: 6px;
+                    spacing: 10px;
+                    Image {
+                        width: 38px;
+                        height: 38px;
+                        source: root.logo;
+                        image-rendering: smooth;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Text { text: "Coda"; color: Theme.text; font-size: 17px; font-weight: 700; }
+                        Text { text: "Rip · Verify · Convert"; color: Theme.muted; font-size: 11px; }
+                    }
+                }
+                NavItem { icon: "◉"; label: "Rip CD"; active: root.page == 0; clicked => { root.page = 0; } }
+                NavItem { icon: "⇄"; label: "Convert"; active: root.page == 1; clicked => { root.page = 1; } }
+                NavItem { icon: "☰"; label: "Presets"; active: root.page == 2; clicked => { root.page = 2; } }
+                NavItem { icon: "⚙"; label: "Settings"; active: root.page == 3; clicked => { root.page = 3; } }
+                Rectangle { vertical-stretch: 1; }
+                Card {
+                    background: Theme.card;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 4px;
+                        Label { text: "DRIVE"; font-size: 10px; }
+                        Text { text: root.drive-label; color: Theme.text; font-size: 12px; wrap: word-wrap; }
+                        Text { text: root.offset-text; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+                    }
+                }
+            }
+        }
+
+        // ======================================================= content
+        Rectangle {
+            horizontal-stretch: 1;
+
+            // --------------------------------------------------- RIP
+            if root.page == 0 : VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    Heading { text: "Rip CD"; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    ComboBox {
+                        width: 260px;
+                        model: root.drives;
+                        current-index <=> root.drive-index;
+                        selected(v) => { root.drive-selected(self.current-index); }
+                    }
+                    Button { text: "↻ Reload"; enabled: !root.ripping && !root.loading; clicked => { root.load-disc(); } }
+                    Button { text: "⏏ Eject"; enabled: !root.ripping; clicked => { root.eject(); } }
+                }
+
+                // album header
+                Card {
+                    HorizontalLayout {
+                        padding: 18px;
+                        spacing: 20px;
+                        Rectangle {
+                            width: 176px;
+                            height: 176px;
+                            border-radius: 10px;
+                            clip: true;
+                            background: Theme.card-hi;
+                            if root.has-cover : Image { source: root.cover; width: parent.width; height: parent.height; image-fit: ImageFit.cover; }
+                            if !root.has-cover : Text { text: root.loading ? "…" : "♪"; font-size: 54px; color: Theme.border; horizontal-alignment: center; vertical-alignment: center; }
+                            ta-cover := TouchArea { mouse-cursor: pointer; clicked => { root.choose-cover(); } }
+                            if ta-cover.has-hover : Rectangle {
+                                background: #000000a0;
+                                Text { text: "Choose artwork…"; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+                        VerticalLayout {
+                            spacing: 8px;
+                            horizontal-stretch: 1;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                VerticalLayout { spacing: 3px; horizontal-stretch: 3; Label { text: "Album"; } LineEdit { text <=> root.album; enabled: root.disc-loaded; } }
+                                VerticalLayout { spacing: 3px; horizontal-stretch: 2; Label { text: "Album artist"; } LineEdit { text <=> root.album-artist; enabled: root.disc-loaded; } }
+                            }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                VerticalLayout { spacing: 3px; horizontal-stretch: 1; Label { text: "Year"; } LineEdit { text <=> root.year; enabled: root.disc-loaded; } }
+                                VerticalLayout { spacing: 3px; horizontal-stretch: 2; Label { text: "Genre"; } LineEdit { text <=> root.genre; enabled: root.disc-loaded; } }
+                            }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    horizontal-stretch: 4;
+                                    Label { text: "Release (" + root.releases.length + " found)"; }
+                                    ComboBox {
+                                        model: root.releases;
+                                        current-index <=> root.release-index;
+                                        enabled: root.disc-loaded && root.releases.length > 1;
+                                        selected(v) => { root.release-selected(self.current-index); }
+                                    }
+                                }
+                                VerticalLayout { spacing: 3px; horizontal-stretch: 1; Label { text: "Disc"; } SpinBox { minimum: 1; maximum: 99; value <=> root.disc-no; enabled: root.disc-loaded; } }
+                                VerticalLayout { spacing: 3px; horizontal-stretch: 1; Label { text: "of"; } SpinBox { minimum: 1; maximum: 99; value <=> root.disc-total; enabled: root.disc-loaded; } }
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                Text { text: root.disc-status; color: Theme.muted; font-size: 12px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                                Text { text: root.cover-info; color: Theme.muted; font-size: 11px; vertical-alignment: center; }
+                            }
+                        }
+                    }
+                }
+
+                // track list
+                Card {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 6px;
+                        HorizontalLayout {
+                            padding: 10px;
+                            spacing: 10px;
+                            Tick { width: 28px; checked: true; enabled: root.disc-loaded && !root.ripping; toggled => { root.select-all(self.checked); } }
+                            Label { text: "#"; width: 26px; }
+                            Label { text: "Title"; horizontal-stretch: 3; }
+                            Label { text: "Artist"; horizontal-stretch: 2; }
+                            Label { text: "Length"; width: 54px; }
+                            Label { text: "Status"; width: 300px; }
+                        }
+                        Rectangle { height: 1px; background: Theme.border; }
+                        ListView {
+                            for t[i] in root.tracks : Rectangle {
+                                height: 48px;
+                                background: ta-row.has-hover ? Theme.hover : transparent;
+                                ta-row := TouchArea { }
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 10px;
+                                    Tick { width: 28px; checked: t.selected; enabled: !root.ripping; toggled => { root.track-toggled(i, self.checked); } }
+                                    Text { text: t.number; width: 26px; color: Theme.muted; vertical-alignment: center; }
+                                    LineEdit { text: t.title; horizontal-stretch: 3; enabled: !root.ripping; edited(v) => { root.track-title-edited(i, v); } }
+                                    LineEdit { text: t.artist; horizontal-stretch: 2; enabled: !root.ripping; edited(v) => { root.track-artist-edited(i, v); } }
+                                    Text { text: t.length; width: 54px; color: Theme.muted; vertical-alignment: center; }
+                                    VerticalLayout {
+                                        width: 300px;
+                                        alignment: center;
+                                        spacing: 5px;
+                                        StatePill { text: t.status; state: t.state; }
+                                        if t.state == 1 : Bar { value: t.progress; state: t.state; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // footer
+                Card {
+                    HorizontalLayout {
+                        padding: 14px;
+                        spacing: 14px;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            width: 300px;
+                            Label { text: "Preset"; }
+                            ComboBox {
+                                model: root.preset-names;
+                                current-index <=> root.rip-preset-index;
+                                enabled: !root.ripping;
+                                selected(v) => { root.rip-preset-selected(self.current-index); }
+                            }
+                            Text { text: root.rip-preset-summary; color: Theme.muted; font-size: 11px; overflow: elide; }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            horizontal-stretch: 1;
+                            Text { text: root.ripping ? root.rip-status : root.ar-summary; color: Theme.text; overflow: elide; }
+                            Bar { value: root.rip-progress; state: 1; opacity: root.ripping ? 1 : 0; }
+                            if root.notes != "" : Text { text: root.notes; color: Theme.warn; font-size: 11px; wrap: word-wrap; }
+                        }
+                        if !root.ripping : PrimaryButton { text: "Rip selected"; enabled: root.disc-loaded && !root.loading; clicked => { root.start-rip(); } }
+                        if root.ripping : PrimaryButton { text: "Cancel"; danger: true; clicked => { root.cancel-rip(); } }
+                    }
+                }
+            }
+
+            // --------------------------------------------------- CONVERT
+            if root.page == 1 : VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Heading { text: "Convert"; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: "＋ Add files"; enabled: !root.converting; clicked => { root.add-files(); } }
+                    Button { text: "＋ Add folder"; enabled: !root.converting; clicked => { root.add-folder(); } }
+                    Button { text: "Clear"; enabled: !root.converting && root.files.length > 0; clicked => { root.clear-files(); } }
+                }
+                Card {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 6px;
+                        HorizontalLayout {
+                            padding: 10px;
+                            spacing: 10px;
+                            Label { text: root.files.length + " files"; horizontal-stretch: 1; }
+                            Label { text: "Status"; width: 320px; }
+                            Rectangle { width: 28px; }
+                        }
+                        Rectangle { height: 1px; background: Theme.border; }
+                        if root.files.length == 0 : VerticalLayout {
+                            alignment: center;
+                            spacing: 8px;
+                            Text { text: "⇄"; font-size: 48px; color: Theme.border; horizontal-alignment: center; }
+                            Text { text: "Drag files or folders here, use the Add buttons, or right-click music in your file manager → Coda"; color: Theme.muted; horizontal-alignment: center; }
+                            Text { text: "FLAC · MP3 · AAC · ALAC · Opus · Vorbis · WMA · WAV · AIFF · WavPack · APE · DSD and more"; color: Theme.muted; font-size: 11px; horizontal-alignment: center; }
+                        }
+                        ListView {
+                            for f[i] in root.files : Rectangle {
+                                height: 46px;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 10px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        horizontal-stretch: 1;
+                                        Text { text: f.name; color: Theme.text; overflow: elide; }
+                                        Text { text: f.folder; color: Theme.muted; font-size: 11px; overflow: elide; }
+                                    }
+                                    VerticalLayout {
+                                        width: 320px;
+                                        alignment: center;
+                                        spacing: 5px;
+                                        StatePill { text: f.status; state: f.state; }
+                                        if f.state == 1 : Bar { value: f.progress; state: 1; }
+                                    }
+                                    Rectangle {
+                                        width: 28px;
+                                        Text { text: "✕"; color: rm.has-hover ? Theme.bad : Theme.muted; horizontal-alignment: center; vertical-alignment: center; }
+                                        rm := TouchArea { enabled: !root.converting; mouse-cursor: pointer; clicked => { root.remove-file(i); } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Card {
+                    HorizontalLayout {
+                        padding: 14px;
+                        spacing: 14px;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            width: 280px;
+                            Label { text: "Preset"; }
+                            ComboBox { model: root.preset-names; current-index <=> root.convert-preset-index; enabled: !root.converting; selected(v) => { root.convert-preset-selected(self.current-index); } }
+                            Text { text: root.convert-preset-summary; color: Theme.muted; font-size: 11px; overflow: elide; }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            width: 250px;
+                            Label { text: "Output naming"; }
+                            ComboBox { model: ["Preset template (tags)", "Mirror source folders", "Next to source file"]; current-index <=> root.naming-mode; enabled: !root.converting; }
+                            Tick { text: "Include sub-folders"; checked <=> root.recursive; enabled: !root.converting; }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            horizontal-stretch: 1;
+                            Text { text: root.convert-status; color: Theme.text; overflow: elide; }
+                            Bar { value: root.convert-progress; state: 1; opacity: root.converting ? 1 : 0; }
+                        }
+                        if !root.converting : PrimaryButton { text: "Convert"; enabled: root.files.length > 0; clicked => { root.start-convert(); } }
+                        if root.converting : PrimaryButton { text: "Cancel"; danger: true; clicked => { root.cancel-convert(); } }
+                    }
+                }
+            }
+
+            // --------------------------------------------------- PRESETS
+            if root.page == 2 : VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Heading { text: "Presets"; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    ComboBox { width: 300px; model: root.preset-names; current-index <=> root.edit-preset-index; selected(v) => { root.preset-select(self.current-index); } }
+                    Button { text: "New"; clicked => { root.preset-new(); } }
+                    Button { text: "Duplicate"; clicked => { root.preset-duplicate(); } }
+                    Button { text: "Delete"; enabled: root.preset-names.length > 1; clicked => { root.preset-delete(); } }
+                }
+                Card {
+                    HorizontalLayout {
+                        padding: 14px;
+                        spacing: 12px;
+                        VerticalLayout { alignment: center; Label { text: "Preset name"; } }
+                        LineEdit { text <=> root.edit-preset-name; horizontal-stretch: 1; }
+                        Button { text: "＋ Add output"; clicked => { root.output-add(); } }
+                        PrimaryButton { text: "Save preset"; clicked => { root.preset-save(); } }
+                    }
+                }
+                Text {
+                    text: "Each output is encoded in parallel from the same source: e.g. FLAC to your archive and MP3 to a portable folder. Template variables: {albumartist} {artist} {album} {title} {track} {tracktotal} {disc} {disctotal} {year} {genre} {composer} {filename} {reldir}. Text in [square brackets] is dropped when a variable inside is empty, e.g. [ (Disc {disc})] only appears on multi-disc albums.";
+                    color: Theme.muted;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: 12px;
+                        padding-right: 14px;
+                        for o[i] in root.edit-outputs : Card {
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 10px;
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Toggle { checked: o.enabled; toggled => { root.output-changed(i, { enabled: self.checked, format: o.format, modes: o.modes, mode: o.mode, value: o.value, value-min: o.value-min, value-max: o.value-max, value-label: o.value-label, dest: o.dest, template: o.template, sample-rate: o.sample-rate, bit-depth: o.bit-depth, stereo: o.stereo, preview: o.preview }); } }
+                                    Text { text: "Output " + (i + 1); color: Theme.text; font-weight: 600; vertical-alignment: center; }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Button { text: "Remove"; enabled: root.edit-outputs.length > 1; clicked => { root.output-remove(i); } }
+                                }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    VerticalLayout { spacing: 3px; horizontal-stretch: 2; Label { text: "Format"; }
+                                        ComboBox { model: root.formats; current-value: o.format;
+                                            selected(v) => { root.output-changed(i, { enabled: o.enabled, format: v, modes: o.modes, mode: o.mode, value: o.value, value-min: o.value-min, value-max: o.value-max, value-label: o.value-label, dest: o.dest, template: o.template, sample-rate: o.sample-rate, bit-depth: o.bit-depth, stereo: o.stereo, preview: o.preview }); } } }
+                                    VerticalLayout { spacing: 3px; horizontal-stretch: 1; Label { text: "Mode"; }
+                                        ComboBox { model: o.modes; current-value: o.mode; enabled: o.modes.length > 1;
+                                            selected(v) => { root.output-changed(i, { enabled: o.enabled, format: o.format, modes: o.modes, mode: v, value: o.value, value-min: o.value-min, value-max: o.value-max, value-label: o.value-label, dest: o.dest, template: o.template, sample-rate: o.sample-rate, bit-depth: o.bit-depth, stereo: o.stereo, preview: o.preview }); } } }
+                                    VerticalLayout { spacing: 3px; horizontal-stretch: 1; Label { text: o.value-label; }
+                                        SpinBox { minimum: o.value-min; maximum: o.value-max; value: o.value; enabled: o.value-label != "";
+                                            edited(v) => { root.output-changed(i, { enabled: o.enabled, format: o.format, modes: o.modes, mode: o.mode, value: v, value-min: o.value-min, value-max: o.value-max, value-label: o.value-label, dest: o.dest, template: o.template, sample-rate: o.sample-rate, bit-depth: o.bit-depth, stereo: o.stereo, preview: o.preview }); } } }
+                                }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    VerticalLayout { spacing: 3px; horizontal-stretch: 1; Label { text: "Sample rate"; }
+                                        ComboBox { model: ["Keep", "44100", "48000", "88200", "96000", "192000"]; current-value: o.sample-rate;
+                                            selected(v) => { root.output-changed(i, { enabled: o.enabled, format: o.format, modes: o.modes, mode: o.mode, value: o.value, value-min: o.value-min, value-max: o.value-max, value-label: o.value-label, dest: o.dest, template: o.template, sample-rate: v, bit-depth: o.bit-depth, stereo: o.stereo, preview: o.preview }); } } }
+                                    VerticalLayout { spacing: 3px; horizontal-stretch: 1; Label { text: "Bit depth"; }
+                                        ComboBox { model: ["Keep", "16", "24", "32"]; current-value: o.bit-depth;
+                                            selected(v) => { root.output-changed(i, { enabled: o.enabled, format: o.format, modes: o.modes, mode: o.mode, value: o.value, value-min: o.value-min, value-max: o.value-max, value-label: o.value-label, dest: o.dest, template: o.template, sample-rate: o.sample-rate, bit-depth: v, stereo: o.stereo, preview: o.preview }); } } }
+                                    VerticalLayout { spacing: 3px; horizontal-stretch: 1; alignment: end; Label { text: " "; }
+                                        Tick { text: "Stereo downmix"; checked: o.stereo;
+                                            toggled => { root.output-changed(i, { enabled: o.enabled, format: o.format, modes: o.modes, mode: o.mode, value: o.value, value-min: o.value-min, value-max: o.value-max, value-label: o.value-label, dest: o.dest, template: o.template, sample-rate: o.sample-rate, bit-depth: o.bit-depth, stereo: self.checked, preview: o.preview }); } } }
+                                }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    VerticalLayout { spacing: 3px; horizontal-stretch: 2; Label { text: "Destination folder"; }
+                                        HorizontalLayout { spacing: 6px;
+                                            LineEdit { text: o.dest;
+                                                edited(v) => { root.output-changed(i, { enabled: o.enabled, format: o.format, modes: o.modes, mode: o.mode, value: o.value, value-min: o.value-min, value-max: o.value-max, value-label: o.value-label, dest: v, template: o.template, sample-rate: o.sample-rate, bit-depth: o.bit-depth, stereo: o.stereo, preview: o.preview }); } }
+                                            Button { text: "Browse…"; clicked => { root.browse-dest(i); } } } }
+                                    VerticalLayout { spacing: 3px; horizontal-stretch: 3; Label { text: "File naming template"; }
+                                        LineEdit { text: o.template;
+                                            edited(v) => { root.output-changed(i, { enabled: o.enabled, format: o.format, modes: o.modes, mode: o.mode, value: o.value, value-min: o.value-min, value-max: o.value-max, value-label: o.value-label, dest: o.dest, template: v, sample-rate: o.sample-rate, bit-depth: o.bit-depth, stereo: o.stereo, preview: o.preview }); } } }
+                                }
+                                Text { text: "Example: " + o.preview; color: Theme.info; font-size: 11px; overflow: elide; }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // --------------------------------------------------- SETTINGS
+            if root.page == 3 : VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+                HorizontalLayout {
+                    Heading { text: "Settings"; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    PrimaryButton { text: "Save settings"; clicked => { root.settings-save(); } }
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 14px;
+                        padding-right: 14px;
+                        Card { VerticalLayout { padding: 16px; spacing: 12px;
+                            Text { text: "Appearance"; color: Theme.text; font-weight: 700; font-size: 15px; }
+                            SettingRow { label: "Mode"; hint: "Follow system tracks your desktop's light/dark setting and switches live.";
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    for m[i] in ["Follow system", "Light", "Dark"] : Rectangle {
+                                        width: 118px;
+                                        height: 32px;
+                                        border-radius: 8px;
+                                        background: root.s-theme-mode == i ? Theme.accent : mta.has-hover ? Theme.hover : Theme.card-hi;
+                                        border-width: 1px;
+                                        border-color: root.s-theme-mode == i ? Theme.accent : Theme.border;
+                                        Text { text: m; color: root.s-theme-mode == i ? Theme.on-accent : Theme.text; font-weight: root.s-theme-mode == i ? 600 : 400; horizontal-alignment: center; vertical-alignment: center; }
+                                        mta := TouchArea { mouse-cursor: pointer; clicked => { root.s-theme-mode = i; root.theme-mode-selected(i); } }
+                                    }
+                                }
+                            }
+                            SettingRow { label: "Colour scheme"; hint: Theme.scheme >= 0 && Theme.scheme < root.scheme-names.length ? root.scheme-names[Theme.scheme] : "";
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    for n[i] in root.scheme-names : Rectangle {
+                                        width: 34px;
+                                        height: 34px;
+                                        border-radius: 17px;
+                                        border-width: Theme.scheme == i ? 2px : 0px;
+                                        border-color: Theme.text;
+                                        Rectangle {
+                                            width: 26px;
+                                            height: 26px;
+                                            border-radius: 13px;
+                                            background: @linear-gradient(135deg, Theme.accent-of(i) 0%, Theme.accent2-of(i) 100%);
+                                        }
+                                        sta := TouchArea { mouse-cursor: pointer; clicked => { root.theme-scheme-selected(i); } }
+                                    }
+                                }
+                            }
+                        } }
+                        Card { VerticalLayout { padding: 16px; spacing: 12px;
+                            Text { text: "CD drive & accuracy"; color: Theme.text; font-weight: 700; font-size: 15px; }
+                            SettingRow { label: "Device"; hint: "Usually /dev/sr0. Your user needs read access (the 'optical' group on most distributions)."; LineEdit { width: 220px; text <=> root.s-device; } }
+                            SettingRow { label: "Read offset (samples)"; hint: "Corrects the drive's sample offset so rips are bit-identical to other drives. Filled automatically from the AccurateRip drive list or detected from a disc in the AccurateRip database.";
+                                SpinBox { width: 130px; minimum: -3000; maximum: 3000; value <=> root.s-offset; }
+                                Button { text: "Look up"; clicked => { root.lookup-offset(); } }
+                                Button { text: "Detect from disc"; clicked => { root.detect-offset(); } } }
+                            SettingRow { label: "Verification"; hint: "AccurateRip first: one fast pass, re-read only tracks AccurateRip cannot confirm. Always: full second pass on every track. Burst: single pass.";
+                                ComboBox { width: 260px; model: ["AccurateRip first, then secure", "Always secure (two passes)", "Burst (fast, AccurateRip only)"]; current-index <=> root.s-verify-mode; } }
+                            SettingRow { label: "Maximum re-reads per bad sector"; hint: ""; SpinBox { width: 130px; minimum: 1; maximum: 200; value <=> root.s-retries; } }
+                            SettingRow { label: "Identical reads required"; hint: "A re-read sector is accepted once the same data comes back this many times."; SpinBox { width: 130px; minimum: 1; maximum: 8; value <=> root.s-matches; } }
+                            SettingRow { label: "Use C2 error pointers"; hint: "Only enable if your drive reports C2 accurately; flagged sectors are re-read."; Toggle { checked <=> root.s-c2; } }
+                            SettingRow { label: "Eject when finished"; hint: ""; Toggle { checked <=> root.s-eject; } }
+                            SettingRow { label: "Write rip log"; hint: "Drive, offset, AccurateRip and CRC results saved next to the files."; Toggle { checked <=> root.s-log; } }
+                            SettingRow { label: "Write cue sheet"; hint: ""; Toggle { checked <=> root.s-cue; } }
+                        } }
+                        Card { VerticalLayout { padding: 16px; spacing: 12px;
+                            Text { text: "Metadata & artwork"; color: Theme.text; font-weight: 700; font-size: 15px; }
+                            SettingRow { label: "MusicBrainz"; hint: "Disc ID lookup with fuzzy TOC fallback; includes ISRCs, MusicBrainz IDs, label, barcode, genres."; Toggle { checked <=> root.s-mb; } }
+                            SettingRow { label: "GnuDB fallback"; hint: "Used when MusicBrainz has no match."; Toggle { checked <=> root.s-gnudb; } }
+                            SettingRow { label: "Contact e-mail (optional)"; hint: "Sent to GnuDB as required by its protocol."; LineEdit { width: 260px; text <=> root.s-contact; } }
+                            SettingRow { label: "Maximum artwork size (px)"; hint: "Cover Art Archive originals can be 5000px+ scans; larger art is downscaled with Lanczos. 0 keeps originals."; SpinBox { width: 130px; minimum: 0; maximum: 8000; value <=> root.s-art-max; } }
+                            SettingRow { label: "Try another source below (px)"; hint: "If the Cover Art Archive image is smaller than this, the iTunes catalogue is searched for a larger one."; SpinBox { width: 130px; minimum: 0; maximum: 3000; value <=> root.s-art-min; } }
+                            SettingRow { label: "Also save cover file"; hint: ""; Toggle { checked <=> root.s-cover-file; } LineEdit { width: 160px; text <=> root.s-cover-name; enabled: root.s-cover-file; } }
+                        } }
+                        Card { VerticalLayout { padding: 16px; spacing: 12px;
+                            Text { text: "Encoding"; color: Theme.text; font-weight: 700; font-size: 15px; }
+                            SettingRow { label: "ffmpeg"; hint: root.ffmpeg-status; LineEdit { width: 260px; text <=> root.s-ffmpeg; } }
+                            SettingRow { label: "Parallel encoders"; hint: "0 = one per CPU thread (" + root.cores + " here)."; SpinBox { width: 130px; minimum: 0; maximum: 128; value <=> root.s-threads; } }
+                            SettingRow { label: "When the output file exists"; hint: ""; ComboBox { width: 200px; model: ["Skip", "Overwrite", "Add a number"]; current-index <=> root.s-existing; } }
+                            SettingRow { label: "Verify lossless encodes"; hint: "Decodes every lossless output and compares an MD5 of the audio with the source."; Toggle { checked <=> root.s-verify-lossless; } }
+                            SettingRow { label: "Portable file names"; hint: "Avoid characters FAT/exFAT/NTFS devices reject (: ? * \" < > |)."; Toggle { checked <=> root.s-portable; } }
+                        } }
+                        Card { VerticalLayout { padding: 16px; spacing: 12px;
+                            Text { text: "File manager integration"; color: Theme.text; font-weight: 700; font-size: 15px; }
+                            SettingRow { label: "Right-click menu"; hint: "Adds 'Coda' actions (Convert… and one per preset) to Dolphin, Nautilus, Nemo, Caja, Thunar and PCManFM-Qt, plus 'Open With' everywhere. " + root.integration-status;
+                                Button { text: "Install"; clicked => { root.install-integration(); } }
+                                Button { text: "Remove"; clicked => { root.remove-integration(); } } }
+                        } }
+                    }
+                }
+            }
+
+            // drop target overlay while files are dragged over the window
+            if root.drop-hover : Rectangle {
+                x: 16px;
+                y: 16px;
+                width: parent.width - 32px;
+                height: parent.height - 32px;
+                border-radius: 16px;
+                border-width: 2px;
+                border-color: Theme.accent;
+                background: Theme.bg.with-alpha(0.88);
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 10px;
+                    Rectangle {
+                        height: 72px;
+                        Rectangle {
+                            width: 72px;
+                            height: 72px;
+                            border-radius: 36px;
+                            background: @linear-gradient(135deg, Theme.accent 0%, Theme.accent2 100%);
+                            Text { text: "↓"; color: Theme.on-accent; font-size: 36px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                    Text { text: root.converting ? "A conversion is running" : "Drop to add to Convert"; color: Theme.text; font-size: 20px; font-weight: 700; horizontal-alignment: center; }
+                    Text { text: root.converting ? "Add more files when it has finished" : "Audio files and whole folders" + (root.recursive ? ", including sub-folders" : ""); color: Theme.muted; horizontal-alignment: center; }
+                }
+            }
+
+            // toast
+            if root.toast != "" : Rectangle {
+                y: parent.height - self.height - 24px;
+                x: (parent.width - self.width) / 2;
+                width: min(parent.width - 48px, toast-text.preferred-width + 40px);
+                height: toast-text.preferred-height + 24px;
+                border-radius: 10px;
+                background: Theme.toast;
+                border-width: 1px;
+                border-color: Theme.border;
+                drop-shadow-blur: 18px;
+                drop-shadow-color: #00000060;
+                toast-text := Text { text: root.toast; color: Theme.text; wrap: word-wrap; width: parent.width - 40px; horizontal-alignment: center; }
+                TouchArea { clicked => { root.toast = ""; } }
+            }
+        }
+    }
+}

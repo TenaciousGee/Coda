@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Service
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+MimeType=audio/*;inode/directory;
+Actions=convert;
+Icon=coda
+
+[Desktop Action convert]
+Name=Convert with Coda…
+Icon=coda
+Exec=coda --convert %F

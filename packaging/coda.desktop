@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Coda
+GenericName=CD Ripper & Audio Converter
+Comment=Secure CD ripping and fast audio conversion
+Exec=coda %F
+Icon=coda
+Terminal=false
+StartupWMClass=coda
+Categories=AudioVideo;Audio;
+MimeType=x-content/audio-cdda;
+Keywords=rip;cd;flac;mp3;convert;accuraterip;

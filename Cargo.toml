@@ -1,0 +1,35 @@
+[package]
+name = "coda"
+version = "0.1.0"
+edition = "2021"
+description = "Secure CD ripper and multi-core audio converter for Linux"
+license = "GPL-3.0-or-later"
+rust-version = "1.95"
+
+[dependencies]
+anyhow = "1.0.104"
+cdtoc = { version = "0.13.2", features = ["accuraterip", "ctdb", "musicbrainz", "cddb"] }
+chrono = "0.4.45"
+crossbeam-channel = "0.5.17"
+dirs = "7.0.0"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+libc = "0.2.191"
+lofty = "0.25.5"
+rfd = { version = "0.18.0", default-features = false, features = ["xdg-portal"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+slint = { version = "1.19.0", features = ["unstable-winit-030"] }
+toml = "1.2.1"
+ureq = { version = "3.5.2", features = ["json"] }
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+
+[build-dependencies]
+slint-build = "1.19.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true

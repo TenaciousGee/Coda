@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Convert with Coda
+Exec=coda --convert %F
+Icon=coda
+Terminal=false
+NoDisplay=true
+MimeType=audio/flac;audio/mpeg;audio/mp4;audio/x-m4a;audio/aac;audio/ogg;audio/opus;audio/x-wav;audio/wav;audio/x-aiff;audio/x-ms-wma;audio/x-wavpack;audio/x-ape;audio/x-tta;audio/x-musepack;audio/x-dsf;audio/x-matroska;inode/directory;
