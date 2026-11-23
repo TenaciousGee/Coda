@@ -73,11 +73,28 @@ impl ArResult {
     }
     pub fn describe(&self) -> String {
         match self {
-            ArResult::Accurate { v2, confidence, total } => {
-                format!("Accurate (AR{} confidence {confidence} of {total})", if *v2 { "v2" } else { "v1" })
-            }
-            ArResult::Mismatch { total } => format!("Not accurate ({total} submissions, none match)"),
+            ArResult::Accurate { v2, confidence, .. } => format!(
+                "Accurate · {confidence} matching rip{} (AccurateRip {})",
+                if *confidence == 1 { "" } else { "s" },
+                if *v2 { "v2" } else { "v1" }
+            ),
+            ArResult::Mismatch { .. } => "Not accurate · no matching AccurateRip rip".into(),
             ArResult::NotInDatabase => "Not in AccurateRip database".into(),
+        }
+    }
+
+    /// Fuller wording for the rip log, including the database total and what it means.
+    pub fn describe_log(&self) -> String {
+        match self {
+            ArResult::Accurate { v2, confidence, total } => format!(
+                "AccurateRip {}: {confidence} matching rip{} ({total} submissions for this track across every pressing and checksum version in the database)",
+                if *v2 { "v2" } else { "v1" },
+                if *confidence == 1 { "" } else { "s" }
+            ),
+            ArResult::Mismatch { total } => format!(
+                "AccurateRip: no match among {total} submissions for this track (a read error, or a pressing not yet in the database)"
+            ),
+            ArResult::NotInDatabase => "AccurateRip: this disc is not in the database".into(),
         }
     }
 }
@@ -201,6 +218,16 @@ mod tests {
         assert_eq!(track_crc(&pcm, false, false).v1, all as u32);
         assert_eq!(track_crc(&pcm, true, true).v1, mid as u32);
         assert_eq!(track_crc(&pcm, true, false).v1, (SKIP..=n).sum::<u64>() as u32);
+    }
+
+    #[test]
+    fn wording() {
+        let a = ArResult::Accurate { v2: true, confidence: 44, total: 631 };
+        assert_eq!(a.describe(), "Accurate · 44 matching rips (AccurateRip v2)");
+        assert!(!a.describe().contains("631"));
+        assert!(a.describe_log().contains("631 submissions"));
+        let one = ArResult::Accurate { v2: false, confidence: 1, total: 1 };
+        assert_eq!(one.describe(), "Accurate · 1 matching rip (AccurateRip v1)");
     }
 
     #[test]

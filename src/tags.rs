@@ -31,6 +31,7 @@ pub struct TrackMeta {
     pub mb_artist_id: String,
     pub mb_album_artist_id: String,
     pub mb_disc_id: String,
+    pub discogs_release_id: String,
     pub label: String,
     pub catalog: String,
     pub barcode: String,
@@ -225,7 +226,7 @@ pub fn write(path: &Path, format: Format, meta: &TrackMeta) -> Result<()> {
     if tag_type == lofty::tag::TagType::VorbisComments {
         // Vorbis comments take free-form keys: keep rip provenance alongside the standard tags.
         let mut vc = lofty::ogg::tag::VorbisComments::from(tag);
-        for (k, v) in [("CDTOC", &meta.cdtoc), ("ACCURATERIPRESULT", &meta.accuraterip), ("MUSICBRAINZ_DISCID", &meta.mb_disc_id)] {
+        for (k, v) in [("CDTOC", &meta.cdtoc), ("ACCURATERIPRESULT", &meta.accuraterip), ("MUSICBRAINZ_DISCID", &meta.mb_disc_id), ("DISCOGS_RELEASE_ID", &meta.discogs_release_id)] {
             if !v.is_empty() {
                 vc.insert(k.to_string(), v.clone());
             }

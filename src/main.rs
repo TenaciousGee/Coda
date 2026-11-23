@@ -2,6 +2,7 @@ mod accuraterip;
 mod cdrom;
 mod config;
 mod converter;
+mod discogs;
 mod dnd;
 mod encoder;
 mod formats;

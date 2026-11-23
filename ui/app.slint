@@ -296,7 +296,8 @@ export component AppWindow inherits Window {
     in property <string> rip-status;
     in property <float> rip-progress;
     in property <string> ar-summary;
-    in property <string> notes;
+    in property <[string]> notes;
+    callback dismiss-notes();
     in property <[string]> preset-names;
     in-out property <int> rip-preset-index;
     in property <string> rip-preset-summary;
@@ -313,6 +314,8 @@ export component AppWindow inherits Window {
     callback track-toggled(int, bool);
     callback select-all(bool);
     callback choose-cover();
+    callback search-discogs();
+    in property <bool> discogs-busy;
     callback rip-preset-selected(int);
 
     // ---------------- convert
@@ -362,6 +365,8 @@ export component AppWindow inherits Window {
     in-out property <bool> s-cue;
     in-out property <bool> s-mb;
     in-out property <bool> s-gnudb;
+    in-out property <bool> s-discogs;
+    in-out property <string> s-discogs-token;
     in-out property <string> s-contact;
     in-out property <int> s-art-max;
     in-out property <int> s-art-min;
@@ -495,11 +500,20 @@ export component AppWindow inherits Window {
                                     spacing: 3px;
                                     horizontal-stretch: 4;
                                     Label { text: "Release (" + root.releases.length + " found)"; }
-                                    ComboBox {
-                                        model: root.releases;
-                                        current-index <=> root.release-index;
-                                        enabled: root.disc-loaded && root.releases.length > 1;
-                                        selected(v) => { root.release-selected(self.current-index); }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        ComboBox {
+                                            horizontal-stretch: 1;
+                                            model: root.releases;
+                                            current-index <=> root.release-index;
+                                            enabled: root.disc-loaded && root.releases.length > 1;
+                                            selected(v) => { root.release-selected(self.current-index); }
+                                        }
+                                        Button {
+                                            text: root.discogs-busy ? "Searching…" : "Search Discogs";
+                                            enabled: root.disc-loaded && !root.discogs-busy && !root.ripping;
+                                            clicked => { root.search-discogs(); }
+                                        }
                                     }
                                 }
                                 VerticalLayout { spacing: 3px; horizontal-stretch: 1; Label { text: "Disc"; } SpinBox { minimum: 1; maximum: 99; value <=> root.disc-no; enabled: root.disc-loaded; } }
@@ -510,6 +524,34 @@ export component AppWindow inherits Window {
                                 Text { text: root.disc-status; color: Theme.muted; font-size: 12px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
                                 Text { text: root.cover-info; color: Theme.muted; font-size: 11px; vertical-alignment: center; }
                             }
+                        }
+                    }
+                }
+
+                // notices (lookup problems, hints): kept out of the footer so long text can
+                // never push the Rip controls off screen; each line is shortened to fit
+                if root.notes.length > 0 : Rectangle {
+                    border-radius: 10px;
+                    background: Theme.warn.with-alpha(0.10);
+                    border-width: 1px;
+                    border-color: Theme.warn.with-alpha(0.35);
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 8px;
+                        padding-top: 8px;
+                        padding-bottom: 8px;
+                        spacing: 10px;
+                        Text { text: "⚠"; color: Theme.warn; font-size: 14px; vertical-alignment: center; }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            spacing: 2px;
+                            for n in root.notes : Text { text: n; color: Theme.text; font-size: 12px; overflow: elide; min-width: 0px; }
+                        }
+                        Rectangle {
+                            width: 26px;
+                            Text { text: "✕"; color: nx.has-hover ? Theme.text : Theme.muted; horizontal-alignment: center; vertical-alignment: center; }
+                            nx := TouchArea { mouse-cursor: pointer; clicked => { root.dismiss-notes(); } }
                         }
                     }
                 }
@@ -581,7 +623,6 @@ export component AppWindow inherits Window {
                             horizontal-stretch: 1;
                             Text { text: root.ripping ? root.rip-status : root.ar-summary; color: Theme.text; overflow: elide; }
                             Bar { value: root.rip-progress; state: 1; opacity: root.ripping ? 1 : 0; }
-                            if root.notes != "" : Text { text: root.notes; color: Theme.warn; font-size: 11px; wrap: word-wrap; }
                         }
                         if !root.ripping : PrimaryButton { text: "Rip selected"; enabled: root.disc-loaded && !root.loading; clicked => { root.start-rip(); } }
                         if root.ripping : PrimaryButton { text: "Cancel"; danger: true; clicked => { root.cancel-rip(); } }
@@ -842,9 +883,11 @@ export component AppWindow inherits Window {
                             Text { text: "Metadata & artwork"; color: Theme.text; font-weight: 700; font-size: 15px; }
                             SettingRow { label: "MusicBrainz"; hint: "Disc ID lookup with fuzzy TOC fallback; includes ISRCs, MusicBrainz IDs, label, barcode, genres."; Toggle { checked <=> root.s-mb; } }
                             SettingRow { label: "GnuDB fallback"; hint: "Used when MusicBrainz has no match."; Toggle { checked <=> root.s-gnudb; } }
+                            SettingRow { label: "Discogs fallback"; hint: "Used when MusicBrainz has no match: searches by the barcode stored on the disc, or the GnuDB result, and checks each release against the disc's track lengths. The Search Discogs button on the Rip page searches by the album and artist you type."; Toggle { checked <=> root.s-discogs; } }
+                            SettingRow { label: "Discogs personal access token"; hint: "Free, from discogs.com/settings/developers → Generate new token. Discogs may require it for searching and cover images, and it raises the rate limit."; LineEdit { width: 260px; input-type: password; placeholder-text: "optional"; text <=> root.s-discogs-token; } }
                             SettingRow { label: "Contact e-mail (optional)"; hint: "Sent to GnuDB as required by its protocol."; LineEdit { width: 260px; text <=> root.s-contact; } }
                             SettingRow { label: "Maximum artwork size (px)"; hint: "Cover Art Archive originals can be 5000px+ scans; larger art is downscaled with Lanczos. 0 keeps originals."; SpinBox { width: 130px; minimum: 0; maximum: 8000; value <=> root.s-art-max; } }
-                            SettingRow { label: "Try another source below (px)"; hint: "If the Cover Art Archive image is smaller than this, the iTunes catalogue is searched for a larger one."; SpinBox { width: 130px; minimum: 0; maximum: 3000; value <=> root.s-art-min; } }
+                            SettingRow { label: "Try another source below (px)"; hint: "If the Cover Art Archive image is smaller than this, the iTunes catalogue (up to 3000 px) and then Discogs are tried for a larger one."; SpinBox { width: 130px; minimum: 0; maximum: 3000; value <=> root.s-art-min; } }
                             SettingRow { label: "Also save cover file"; hint: ""; Toggle { checked <=> root.s-cover-file; } LineEdit { width: 160px; text <=> root.s-cover-name; enabled: root.s-cover-file; } }
                         } }
                         Card { VerticalLayout { padding: 16px; spacing: 12px;

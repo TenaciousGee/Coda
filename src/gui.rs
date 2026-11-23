@@ -52,6 +52,7 @@ struct State {
     edit_index: usize,
     edit: Preset,
     just_ripped: bool,
+    notes: Vec<String>,
     /// Desktop light/dark preference from the XDG settings portal (None = unknown).
     system_dark: Option<bool>,
     logo_px: u32,
@@ -134,6 +135,9 @@ pub fn run(initial: Vec<PathBuf>, page: i32) -> i32 {
     ui.set_convert_status(ss("Ready"));
 
     wire_rip(&ui);
+    if let (Some(_), Ok(n)) = (std::env::var_os("CODA_DEBUG"), std::env::var("CODA_DEBUG_NOTES")) {
+        set_notes(&ui, n.split('|').map(String::from).collect());
+    }
     wire_convert(&ui);
     wire_presets(&ui);
     wire_settings(&ui);
@@ -275,7 +279,7 @@ fn clear_disc(ui: &AppWindow, msg: &str) {
     ui.set_has_cover(false);
     ui.set_cover_info(ss(""));
     ui.set_ar_summary(ss(""));
-    ui.set_notes(ss(""));
+    set_notes(ui, vec![]);
     ui.set_disc_status(ss(msg));
 }
 
@@ -331,7 +335,7 @@ fn apply_disc(ui: &AppWindow, info: DiscInfo, cover: Option<Vec<u8>>) {
         None => "AccurateRip unavailable · tracks will be verified by secure re-reading".into(),
     };
     ui.set_ar_summary(ss(ar));
-    ui.set_notes(ss(info.notes.join("\n")));
+    set_notes(ui, info.notes.clone());
     let releases: Vec<String> = if info.candidates.is_empty() {
         vec!["No metadata found: type it in".into()]
     } else {
@@ -362,6 +366,20 @@ fn apply_disc(ui: &AppWindow, info: DiscInfo, cover: Option<Vec<u8>>) {
     apply_candidate(ui, first);
     set_cover(ui, cover.map(Arc::new), "");
     ui.set_disc_loaded(true);
+}
+
+fn set_notes(ui: &AppWindow, notes: Vec<String>) {
+    with(|s| s.notes = notes.clone());
+    ui.set_notes(strings(notes));
+}
+
+/// Once a release has been found another way, earlier "no match"/lookup warnings are stale.
+fn clear_metadata_notes(ui: &AppWindow) {
+    let kept: Vec<String> = with(|s| s.notes.clone())
+        .into_iter()
+        .filter(|n| !["MusicBrainz", "GnuDB", "Discogs", "online match"].iter().any(|k| n.contains(k)))
+        .collect();
+    set_notes(ui, kept);
 }
 
 fn apply_candidate(ui: &AppWindow, c: Option<AlbumCandidate>) {
@@ -537,6 +555,10 @@ fn wire_rip(ui: &AppWindow) {
         refresh_summaries(&ui);
     });
     let w = ui.as_weak();
+    ui.on_dismiss_notes(move || set_notes(&w.unwrap(), vec![]));
+    let w = ui.as_weak();
+    ui.on_search_discogs(move || search_discogs(&w.unwrap()));
+    let w = ui.as_weak();
     ui.on_start_rip(move || start_rip(&w.unwrap()));
     let w = ui.as_weak();
     ui.on_cancel_rip(move || {
@@ -544,6 +566,62 @@ fn wire_rip(ui: &AppWindow) {
             c.store(true, Ordering::Relaxed);
             w.unwrap().set_rip_status(ss("Cancelling…"));
         }
+    });
+}
+
+/// Manual Discogs search from the album/artist fields (or the disc's barcode if the
+/// album field is empty). Matches are added to the release list and the best one applied.
+fn search_discogs(ui: &AppWindow) {
+    let Some((lengths, mcn)) = with(|s| s.disc.as_ref().map(|d| ((0..d.track_count()).map(|i| d.track_seconds(i)).collect::<Vec<_>>(), d.mcn.clone()))) else {
+        return;
+    };
+    let album = ui.get_album().trim().to_string();
+    let artist = ui.get_album_artist().trim().to_string();
+    let unknown = album.is_empty() || album == "Unknown album";
+    let query = match (unknown, mcn) {
+        (true, Some(b)) => crate::discogs::Query::Barcode(b),
+        (true, None) => {
+            toast(ui, "Type the album title (and artist) to search Discogs");
+            return;
+        }
+        (false, _) => crate::discogs::Query::Text { artist: if artist == "Unknown artist" { String::new() } else { artist }, album },
+    };
+    let st = with(|s| s.cfg.settings.clone());
+    ui.set_discogs_busy(true);
+    let w = ui.as_weak();
+    std::thread::spawn(move || {
+        let r = crate::discogs::search(&query, &lengths, &st.discogs_token);
+        let cover = r.as_ref().ok().and_then(|f| f.first()).and_then(|c| metadata::fetch_cover(c, &st));
+        let _ = w.upgrade_in_event_loop(move |ui| {
+            ui.set_discogs_busy(false);
+            let found = match r {
+                Ok(f) => f,
+                Err(e) => return toast(&ui, crate::net::describe("Discogs", &e)),
+            };
+            if found.is_empty() {
+                return toast(&ui, "No Discogs release matches this disc's track count and lengths");
+            }
+            let n = found.len();
+            let first = found[0].clone();
+            let idx = with(|s| {
+                let d = s.disc.as_mut()?;
+                // drop the "nothing found" state and earlier Discogs results for this disc
+                d.candidates.retain(|c| c.source != "Discogs");
+                let at = d.candidates.len();
+                d.candidates.extend(found);
+                Some((at, d.candidates.iter().map(|c| c.summary()).collect::<Vec<_>>()))
+            });
+            let Some((at, names)) = idx else { return };
+            ui.set_releases(strings(names));
+            ui.set_release_index(at as i32);
+            apply_candidate(&ui, Some(first));
+            clear_metadata_notes(&ui);
+            with(|s| s.cover_req += 1);
+            if cover.is_some() {
+                set_cover(&ui, cover.map(Arc::new), " · Discogs match");
+            }
+            toast(&ui, if n == 1 { "Found 1 matching Discogs release".to_string() } else { format!("Found {n} matching Discogs releases, best match selected") });
+        });
     });
 }
 
@@ -580,6 +658,7 @@ fn build_metas(ui: &AppWindow) -> Option<(DiscInfo, Vec<TrackMeta>, Vec<bool>)> 
                 mb_track_id: ct.map(|t| t.track_id.clone()).unwrap_or_default(),
                 mb_artist_id: ct.map(|t| t.artist_id.clone()).unwrap_or_default(),
                 mb_disc_id: disc.cdtoc.musicbrainz_id().to_string(),
+                discogs_release_id: cand.as_ref().map(|c| c.discogs_id.clone()).unwrap_or_default(),
                 label: cand.as_ref().map(|c| c.label.clone()).unwrap_or_default(),
                 catalog: cand.as_ref().map(|c| c.catalog.clone()).unwrap_or_default(),
                 barcode: cand.as_ref().map(|c| c.barcode.clone()).filter(|b| !b.is_empty()).or_else(|| disc.mcn.clone()).unwrap_or_default(),
@@ -1331,6 +1410,8 @@ fn load_settings_into_ui(ui: &AppWindow) {
         ui.set_s_cue(st.write_cue);
         ui.set_s_mb(st.musicbrainz);
         ui.set_s_gnudb(st.gnudb_fallback);
+        ui.set_s_discogs(st.discogs_fallback);
+        ui.set_s_discogs_token(ss(&st.discogs_token));
         ui.set_s_contact(ss(&st.contact_email));
         ui.set_s_art_max(st.art_max_px as i32);
         ui.set_s_art_min(st.art_min_px as i32);
@@ -1389,6 +1470,8 @@ fn wire_settings(ui: &AppWindow) {
             st.write_cue = ui.get_s_cue();
             st.musicbrainz = ui.get_s_mb();
             st.gnudb_fallback = ui.get_s_gnudb();
+            st.discogs_fallback = ui.get_s_discogs();
+            st.discogs_token = ui.get_s_discogs_token().trim().to_string();
             st.contact_email = ui.get_s_contact().trim().to_string();
             st.art_max_px = ui.get_s_art_max().max(0) as u32;
             st.art_min_px = ui.get_s_art_min().max(0) as u32;
@@ -1427,7 +1510,7 @@ fn wire_settings(ui: &AppWindow) {
                     toast(&ui, format!("AccurateRip lists {v} {m} with offset {o:+}. Press Save settings to keep it."));
                 }
                 Ok(None) => toast(&ui, format!("{v} {m} is not in the AccurateRip list; insert a popular CD and use Detect.")),
-                Err(e) => toast(&ui, format!("Lookup failed: {e:#}")),
+                Err(e) => toast(&ui, crate::net::describe("AccurateRip", &e)),
             });
         });
     });

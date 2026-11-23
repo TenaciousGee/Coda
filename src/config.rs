@@ -81,6 +81,9 @@ pub struct Settings {
     pub write_cue: bool,
     pub musicbrainz: bool,
     pub gnudb_fallback: bool,
+    pub discogs_fallback: bool,
+    /// Optional Discogs personal access token (discogs.com/settings/developers).
+    pub discogs_token: String,
     pub contact_email: String,
     /// Artwork larger than this (longest side, px) is downscaled. 0 = never.
     pub art_max_px: u32,
@@ -114,6 +117,8 @@ impl Default for Settings {
             write_cue: true,
             musicbrainz: true,
             gnudb_fallback: true,
+            discogs_fallback: true,
+            discogs_token: String::new(),
             contact_email: String::new(),
             art_max_px: 3000,
             art_min_px: 1000,

@@ -52,6 +52,33 @@ pub fn get_json(url: &str) -> Result<serde_json::Value> {
     Ok(resp.body_mut().with_config().limit(16 * 1024 * 1024).read_json()?)
 }
 
+/// GET with an optional Authorization header (Discogs personal tokens).
+pub fn get_json_with_auth(url: &str, auth: Option<&str>) -> Result<serde_json::Value> {
+    let mut req = agent().get(url).header("Accept", "application/json");
+    if let Some(a) = auth {
+        req = req.header("Authorization", a);
+    }
+    let mut resp = req.call().with_context(|| format!("GET {url}"))?;
+    Ok(resp.body_mut().with_config().limit(16 * 1024 * 1024).read_json()?)
+}
+
+pub fn get_bytes_with_auth(url: &str, auth: Option<&str>) -> Result<Vec<u8>> {
+    let mut req = agent().get(url);
+    if let Some(a) = auth {
+        req = req.header("Authorization", a);
+    }
+    let mut resp = req.call().with_context(|| format!("GET {url}"))?;
+    Ok(resp.body_mut().with_config().limit(64 * 1024 * 1024).read_to_vec()?)
+}
+
+/// HTTP status of a failed request, if that's what failed.
+pub fn status_of(e: &anyhow::Error) -> Option<u16> {
+    e.chain().find_map(|c| match c.downcast_ref::<ureq::Error>() {
+        Some(ureq::Error::StatusCode(s)) => Some(*s),
+        _ => None,
+    })
+}
+
 pub fn get_text(url: &str) -> Result<String> {
     let mut resp = agent().get(url).call().with_context(|| format!("GET {url}"))?;
     Ok(resp.body_mut().with_config().limit(4 * 1024 * 1024).read_to_string()?)
@@ -72,4 +99,68 @@ pub fn urlencode(s: &str) -> String {
         }
     }
     o
+}
+
+/// A short, human message for a failed lookup: no URLs, says what to do.
+pub fn describe(service: &str, e: &anyhow::Error) -> String {
+    match status_of(e) {
+        Some(503) | Some(502) | Some(504) => return format!("{service} is busy or down for maintenance right now"),
+        Some(429) => return format!("{service} asked us to slow down (rate limit)"),
+        Some(401) | Some(403) => return format!("{service} refused the request (HTTP {})", status_of(e).unwrap_or(0)),
+        Some(code) => return format!("{service} returned an error (HTTP {code})"),
+        None => {}
+    }
+    let offline = e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<ureq::Error>(),
+            Some(ureq::Error::Io(_) | ureq::Error::HostNotFound | ureq::Error::ConnectionFailed | ureq::Error::Timeout(_))
+        )
+    });
+    if offline {
+        return format!("Couldn't reach {service}: check your internet connection");
+    }
+    // our own messages (e.g. Discogs token hints) are the root cause and already readable
+    let root = e.root_cause().to_string();
+    let short: String = root.chars().take(140).collect();
+    format!("{service}: {short}")
+}
+
+/// True for errors worth retrying after a pause (busy server, rate limit, timeout).
+pub fn is_transient(e: &anyhow::Error) -> bool {
+    matches!(status_of(e), Some(429 | 500 | 502 | 503 | 504))
+        || e.chain().any(|c| matches!(c.downcast_ref::<ureq::Error>(), Some(ureq::Error::Timeout(_))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// One-shot local HTTP server answering with `status`.
+    fn serve(status: u16) -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = l.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = c.read(&mut buf);
+                let _ = write!(c, "HTTP/1.1 {status} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            }
+        });
+        format!("http://{addr}/ws/2/discid/abc?toc=1+15+264208&inc=artist-credits&fmt=json")
+    }
+
+    #[test]
+    fn friendly_messages_have_no_urls() {
+        let e = get_json(&serve(503)).unwrap_err();
+        assert!(is_transient(&e));
+        let m = describe("MusicBrainz", &e);
+        assert_eq!(m, "MusicBrainz is busy or down for maintenance right now");
+        let e = get_json(&serve(404)).unwrap_err();
+        assert!(!is_transient(&e) && is_not_found(&e));
+        let e = get_json("http://127.0.0.1:9/nothing-listens-here").unwrap_err();
+        let m = describe("GnuDB", &e);
+        assert!(m.starts_with("Couldn't reach GnuDB"), "{m}");
+        assert!(!m.contains("http"));
+    }
 }

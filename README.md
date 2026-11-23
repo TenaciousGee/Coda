@@ -16,7 +16,7 @@ The name comes from the Latin *cauda*, "tail": in music a coda is the concluding
 |---|---|
 | Bit-perfect, verified rips | Raw CD-DA reads over SCSI pass-through (SG_IO, `READ CD`), drive read offset correction, AccurateRip v1 + v2 verification, secure re-reading of anything AccurateRip can't confirm, optional C2 error pointers, a rip log with AccurateRip and copy CRCs, and MD5 verification of every lossless encode against the ripped audio. |
 | Drive offsets | Looked up automatically in AccurateRip's published drive offset table on first use and saved per drive. If your drive isn't listed, the offset is detected from any CD that is in the AccurateRip database (key-disc method). It can also be set by hand. |
-| Metadata and artwork | MusicBrainz disc ID lookup (with fuzzy TOC fallback), GnuDB fallback. Artwork from the Cover Art Archive at original resolution, falling back to the iTunes catalogue (up to 3000×3000) when the CAA image is missing or small. Oversized scans are downscaled (default cap 3000 px, configurable) and embedded in every file, plus `cover.jpg` in each album folder. ISRCs and the disc barcode (MCN) are read from the disc itself. |
+| Metadata and artwork | MusicBrainz disc ID lookup (with fuzzy TOC fallback), then GnuDB, then Discogs (matched by the disc's barcode and verified against its track lengths), plus a manual "Search Discogs" button. Artwork from the Cover Art Archive at original resolution, falling back to the iTunes catalogue (up to 3000×3000) when the CAA image is missing or small. Oversized scans are downscaled (default cap 3000 px, configurable) and embedded in every file, plus `cover.jpg` in each album folder. ISRCs and the disc barcode (MCN) are read from the disc itself. |
 | Presets with multiple outputs | A preset is a list of outputs, each with its own format, quality, destination folder and naming template. "FLAC + MP3 V0" writes lossless to your archive and MP3 to a portable folder from one rip. |
 | Converter formats | Output: FLAC, MP3, AAC (M4A), Apple Lossless (ALAC), Opus, Ogg Vorbis, WMA, WAV, AIFF, WavPack, TTA. Input: all of those plus Monkey's Audio (APE), Musepack, DSD (DSF/DFF), TAK, Matroska audio, CAF, W64 and anything else ffmpeg decodes. |
 | Speed | One encoder process per CPU thread. During a rip, tracks are encoded on all cores while the next track is being read. |
@@ -82,6 +82,14 @@ coda presets
 coda inspect file.flac
 ```
 
+### Metadata sources
+
+1. **MusicBrainz** by disc ID (exact), then by table of contents (fuzzy).
+2. **GnuDB** (the freedb successor) when MusicBrainz has nothing.
+3. **Discogs** when MusicBrainz has nothing. Discogs has no disc-ID lookup, so Coda searches by the barcode stored on the CD (or by the GnuDB artist and album) and keeps only releases with a disc of the same track count, ranked by how closely the track lengths match. Results include label, catalogue number, barcode and style, and the Discogs release ID is written to FLAC/Opus/Vorbis tags as `DISCOGS_RELEASE_ID`.
+
+The **Search Discogs** button on the Rip page searches by the album and artist in the fields, so you can fill gaps or pick a specific pressing at any time. A free Discogs personal access token (discogs.com/settings/developers → Generate new token, pasted into Settings) may be needed for search and cover images, and raises the rate limit.
+
 ### Appearance
 
 Settings → Appearance offers **Follow system**, **Light** and **Dark**. Follow system reads your desktop's light/dark preference (the standard XDG setting that KDE Plasma, GNOME and others publish) and switches live when you change it. Eight colour schemes (Aurora, Ocean, Emerald, Sunset, Rose, Amber, Graphite, Nord) recolour buttons, switches, tick boxes, highlights and progress bars, with tuned variants for light and dark mode. Both choices apply instantly and are remembered.
@@ -114,6 +122,7 @@ src/cdrom.rs        Linux drive access: TOC ioctls, SG_IO READ CD, C2, ISRC/MCN,
 src/ripper.rs       disc loading, secure read engine, offset detection, logs, cue sheets
 src/accuraterip.rs  AccurateRip v1/v2 checksums, database parsing, drive offsets
 src/metadata.rs     MusicBrainz, GnuDB, Cover Art Archive, iTunes artwork
+src/discogs.rs      Discogs search, release parsing and track-length matching
 src/encoder.rs      ffmpeg job runner, source probing, lossless verification, worker pool
 src/converter.rs    folder scanning and job planning
 src/formats.rs      output formats and encoder settings

@@ -65,7 +65,7 @@ pub fn load_disc(device: &Path, st: &Settings, status: &dyn Fn(&str)) -> Result<
     let ar = match accuraterip::lookup(&cdtoc) {
         Ok(a) => Some(a),
         Err(e) => {
-            notes.push(format!("AccurateRip lookup failed: {e:#}"));
+            notes.push(format!("{}. Rips will be verified by secure re-reading instead.", crate::net::describe("AccurateRip", &e)));
             None
         }
     };
@@ -83,7 +83,7 @@ pub fn load_disc(device: &Path, st: &Settings, status: &dyn Fn(&str)) -> Result<
                 offset_source = "AccurateRip drive database".into();
             }
             Ok(None) => notes.push(format!("{} {} is not in the AccurateRip drive offset list", drive.vendor, drive.model)),
-            Err(e) => notes.push(format!("Drive offset list unavailable: {e:#}")),
+            Err(e) => notes.push(format!("{} (drive offset list).", crate::net::describe("AccurateRip", &e))),
         }
     }
     if offset.is_none() {
@@ -95,7 +95,7 @@ pub fn load_disc(device: &Path, st: &Settings, status: &dyn Fn(&str)) -> Result<
                     offset_source = format!("detected with this disc (confidence {conf})");
                 }
                 Ok(None) => notes.push("Could not detect the read offset with this disc; try another popular CD".into()),
-                Err(e) => notes.push(format!("Offset detection failed: {e:#}")),
+                Err(e) => notes.push(format!("Offset detection didn't finish: {}", e.root_cause())),
             }
         }
     }
@@ -105,19 +105,53 @@ pub fn load_disc(device: &Path, st: &Settings, status: &dyn Fn(&str)) -> Result<
     let c2 = st.use_c2 && drive.supports_c2(toc.audio_tracks()[0].lba);
 
     let mut candidates = Vec::new();
+    let mut mb_failed = false;
     if st.musicbrainz {
         status("Searching MusicBrainz…");
         match metadata::musicbrainz(&cdtoc) {
             Ok(c) => candidates.extend(c),
-            Err(e) => notes.push(format!("MusicBrainz lookup failed: {e:#}")),
+            Err(e) => {
+                mb_failed = true;
+                notes.push(format!("{}. Press Reload to try again.", crate::net::describe("MusicBrainz", &e)));
+            }
         }
     }
     if candidates.is_empty() && st.gnudb_fallback {
         status("Searching GnuDB…");
         match metadata::gnudb(&cdtoc, &st.contact_email) {
             Ok(c) => candidates.extend(c),
-            Err(e) => notes.push(format!("GnuDB lookup failed: {e:#}")),
+            Err(e) => notes.push(format!("{}.", crate::net::describe("GnuDB", &e))),
         }
+    }
+    // Discogs when MusicBrainz had nothing: by the disc's own barcode, else by the
+    // artist/album GnuDB suggested (Discogs adds label, catalogue number, styles, art).
+    let has_mb = candidates.iter().any(|c| c.source == "MusicBrainz");
+    if !has_mb && st.discogs_fallback {
+        let query = mcn.clone().map(crate::discogs::Query::Barcode).or_else(|| {
+            candidates.first().map(|c| crate::discogs::Query::Text { artist: c.artist.clone(), album: c.title.clone() })
+        });
+        if query.is_none() {
+            notes.push("This disc has no barcode for Discogs: type the album and artist, then press Search Discogs.".into());
+        }
+        if let Some(q) = query {
+            status("Searching Discogs…");
+            let lengths: Vec<f64> = (0..toc.audio_tracks().len()).map(|i| {
+                let (a, b) = toc.audio_range(i);
+                (b - a) as f64 / 75.0
+            }).collect();
+            match crate::discogs::search(&q, &lengths, &st.discogs_token) {
+                // Discogs results are richer than GnuDB's, so list them first
+                Ok(found) => {
+                    let mut merged = found;
+                    merged.append(&mut candidates);
+                    candidates = merged;
+                }
+                Err(e) => notes.push(format!("{}.", crate::net::describe("Discogs", &e))),
+            }
+        }
+    }
+    if candidates.is_empty() && !mb_failed && st.musicbrainz && !notes.iter().any(|n| n.contains("Search Discogs")) {
+        notes.insert(0, "No online match for this disc yet: type the details in, or press Search Discogs.".into());
     }
     Ok(DiscInfo {
         device: device.into(),
@@ -624,10 +658,10 @@ fn rip_inner(req: &RipRequest, cancel: &Arc<AtomicBool>, sink: &RipSink) -> Resu
         req.preset.name
     ));
     for (idx, r) in reads.iter().enumerate() {
-        let Some((crc, _, copy, status)) = r else { continue };
+        let Some((crc, ar, copy, status)) = r else { continue };
         let (a, b) = info.toc.audio_range(idx);
         log.push_str(&format!(
-            "Track {:2}  {} – {}  [{}]\n  AR v1 {:08X}  AR v2 {:08X}  Copy CRC {:08X}\n  {}\n",
+            "Track {:2}  {} – {}  [{}]\n  AR v1 {:08X}  AR v2 {:08X}  Copy CRC {:08X}\n  {}\n  {}\n",
             idx + 1,
             msf(a),
             msf(b - a),
@@ -635,7 +669,8 @@ fn rip_inner(req: &RipRequest, cancel: &Arc<AtomicBool>, sink: &RipSink) -> Resu
             crc.v1,
             crc.v2,
             copy,
-            status
+            status,
+            ar.describe_log()
         ));
         for p in &dests[idx] {
             log.push_str(&format!("  → {}\n", p.display()));

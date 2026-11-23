@@ -34,6 +34,10 @@ pub struct AlbumCandidate {
     pub disc: u32,
     pub disc_total: u32,
     pub tracks: Vec<CandTrack>,
+    /// Discogs release ID, when the candidate came from Discogs
+    pub discogs_id: String,
+    /// Front cover URL offered by the source (Discogs)
+    pub cover_url: String,
 }
 
 impl AlbumCandidate {
@@ -95,17 +99,34 @@ pub fn musicbrainz(toc: &cdtoc::Toc) -> Result<Vec<AlbumCandidate>> {
     let url = |inc: &str| format!("https://musicbrainz.org/ws/2/discid/{disc_id}?toc={toc_param}&cdstubs=no&inc={inc}&fmt=json");
     let full = "artist-credits+recordings+release-groups+labels+isrcs+genres";
     let minimal = "artist-credits+recordings+release-groups+labels";
-    let v = match net::get_json(&url(full)) {
+    let v = match mb_get(&url(full)) {
         Ok(v) => v,
         Err(e) if net::is_not_found(&e) => return Ok(vec![]),
         // if the server ever rejects an optional include, fall back to the essentials
-        Err(_) => match net::get_json(&url(minimal)) {
+        Err(e) if net::status_of(&e) == Some(400) => match mb_get(&url(minimal)) {
             Ok(v) => v,
             Err(e) if net::is_not_found(&e) => return Ok(vec![]),
             Err(e) => return Err(e),
         },
+        Err(e) => return Err(e),
     };
     Ok(parse_musicbrainz(&v, &disc_id, audio.len()))
+}
+
+/// MusicBrainz allows about one request per second and answers 503 when busy or
+/// when that is exceeded, so back off and retry a few times before giving up.
+fn mb_get(url: &str) -> anyhow::Result<Value> {
+    let waits = [1500u64, 3000, 5000];
+    let mut attempt = 0;
+    loop {
+        match net::get_json(url) {
+            Err(e) if net::is_transient(&e) && attempt < waits.len() => {
+                std::thread::sleep(std::time::Duration::from_millis(waits[attempt]));
+                attempt += 1;
+            }
+            r => return r,
+        }
+    }
 }
 
 pub fn parse_musicbrainz(v: &Value, disc_id: &str, n_tracks: usize) -> Vec<AlbumCandidate> {
@@ -158,6 +179,7 @@ pub fn parse_musicbrainz(v: &Value, disc_id: &str, n_tracks: usize) -> Vec<Album
             disc: medium.get("position").and_then(|p| p.as_u64()).unwrap_or(1) as u32,
             disc_total: media.len().max(1) as u32,
             tracks,
+            ..Default::default()
         });
     }
     out
@@ -291,14 +313,22 @@ fn itunes(artist: &str, album: &str, px: u32) -> Option<Vec<u8>> {
 pub fn fetch_cover(c: &AlbumCandidate, st: &Settings) -> Option<Vec<u8>> {
     let mut best = caa(&c.release_id, &c.release_group_id);
     let small = |b: &Option<Vec<u8>>| b.as_ref().and_then(|b| dims(b)).map(|(w, h)| w.min(h) < st.art_min_px).unwrap_or(true);
-    if small(&best) {
-        let px = if st.art_max_px == 0 { 3000 } else { st.art_max_px.min(3000) };
-        if let Some(alt) = itunes(&c.artist, &c.title, px) {
-            let area = |b: &Vec<u8>| dims(b).map(|(w, h)| w as u64 * h as u64).unwrap_or(0);
+    let area = |b: &Vec<u8>| dims(b).map(|(w, h)| w as u64 * h as u64).unwrap_or(0);
+    let consider = |alt: Option<Vec<u8>>, best: &mut Option<Vec<u8>>| {
+        if let Some(alt) = alt {
             if best.as_ref().map(|b| area(&alt) > area(b)).unwrap_or(true) {
-                best = Some(alt);
+                *best = Some(alt);
             }
         }
+    };
+    if small(&best) {
+        let px = if st.art_max_px == 0 { 3000 } else { st.art_max_px.min(3000) };
+        consider(itunes(&c.artist, &c.title, px), &mut best);
+    }
+    // Discogs images are usually around 600 px, so they're the last resort
+    if small(&best) && !c.cover_url.is_empty() {
+        let auth = (!st.discogs_token.trim().is_empty()).then(|| format!("Discogs token={}", st.discogs_token.trim()));
+        consider(net::get_bytes_with_auth(&c.cover_url, auth.as_deref()).ok(), &mut best);
     }
     best.and_then(|b| normalise_art(b, st.art_max_px).ok())
 }
