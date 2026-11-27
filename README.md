@@ -71,6 +71,7 @@ Your user needs read access to `/dev/sr0`. On Arch-based systems logged-in deskt
 ## Use
 
 * **Rip CD**: insert a disc and it is detected automatically. Pick the release if MusicBrainz offers several, edit anything, click the artwork to replace it, choose a preset and press **Rip selected**.
+* **Tag**: see below.
 * **Convert**: drag files or folders from your file manager onto the window (from any page), use the Add buttons, or right-click them in your file manager. Choose a preset and naming mode, press **Convert**. Drag and drop works natively on both Wayland and X11.
 * **Presets**: add outputs, pick format and quality, set destination and template. The example line shows the resulting path as you type.
 * **Command line**:
@@ -78,9 +79,23 @@ Your user needs read access to `/dev/sr0`. On Arch-based systems logged-in deskt
 ```sh
 coda convert --preset "FLAC + MP3 V0 (portable copy)" ~/Downloads/album
 coda convert --preset "Opus 160 kbps" --naming mirror ~/Music/FLAC
+coda --tag ~/Music/Unsorted
 coda presets
 coda inspect file.flac
 ```
+
+### Tag
+
+Fix or complete the tags of files you already have, one album or hundreds at a time.
+
+1. Drag files or folders onto the Tag page (or Add, or right-click → Coda → Tag…). Files are grouped into albums automatically, even across CD1/CD2 folders.
+2. **Search** looks the album up in MusicBrainz and Discogs. Each result is scored against your files: every file is paired with a release track by track number, length and title, so wrong or missing titles don't stop a match, and other editions (live, remasters with different lengths) score low or are rejected.
+3. Review the **Current → New** view: album fields, artwork and every track side by side, with changes outlined. Edit anything (your own values always win), untick files you don't want touched, choose a different match, or press **Use current tags** to tag entirely by hand.
+4. **Save album** writes the ticked files. Optionally **rename** them from the new tags (within the same folder).
+
+For a whole library: **Auto-match all** applies matches of 80% or better and marks the rest "Review" with their candidates ready to choose from; **Save all matched** then writes everything you've accepted.
+
+Re-tagging only changes the fields shown. Everything else in the file is preserved: ReplayGain, lyrics, custom fields, other pictures, and the existing artwork unless you tick **Replace artwork** (on by default only when the new image is bigger). Verified for FLAC, MP3, M4A, Opus, Ogg Vorbis, WavPack, AIFF and WMA.
 
 ### Metadata sources
 
@@ -126,7 +141,8 @@ src/discogs.rs      Discogs search, release parsing and track-length matching
 src/encoder.rs      ffmpeg job runner, source probing, lossless verification, worker pool
 src/converter.rs    folder scanning and job planning
 src/formats.rs      output formats and encoder settings
-src/tags.rs         tag and artwork reading/writing (lofty, ffmpeg fallback)
+src/tags.rs         tag and artwork reading/writing, safe in-place updates (lofty, ffmpeg fallback)
+src/tagger.rs       album grouping, release search and track matching for re-tagging
 src/naming.rs       path templates
 src/integration.rs  file manager context menus
 src/dnd.rs          drag and drop from file managers (Wayland protocol + X11)

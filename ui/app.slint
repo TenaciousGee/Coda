@@ -141,6 +141,57 @@ component Tick inherits Rectangle {
     }
 }
 
+export struct TagGroupRow {
+    title: string,
+    subtitle: string,
+    status: string,
+    state: int,
+}
+
+export struct TagFieldRow {
+    label: string,
+    current: string,
+    new: string,
+    changed: bool,
+}
+
+export struct TagTrackRow {
+    apply: bool,
+    cur-line: string,
+    cur-sub: string,
+    num: string,
+    title: string,
+    artist: string,
+    num-changed: bool,
+    title-changed: bool,
+    artist-changed: bool,
+    note: string,
+    note-state: int,
+}
+
+// text box outlined in the accent colour when its value differs from the file's
+component DiffEdit inherits Rectangle {
+    in property <string> text;
+    in property <bool> changed;
+    in property <bool> enabled: true;
+    in property <string> placeholder;
+    callback edited(string);
+    height: 36px;
+    border-radius: 8px;
+    border-width: root.changed ? 1.5px : 0px;
+    border-color: Theme.accent;
+    LineEdit {
+        x: 2px;
+        y: 2px;
+        width: parent.width - 4px;
+        height: parent.height - 4px;
+        text: root.text;
+        enabled: root.enabled;
+        placeholder-text: root.placeholder;
+        edited(v) => { root.edited(v); }
+    }
+}
+
 component Card inherits Rectangle {
     background: Theme.card;
     border-radius: Theme.radius;
@@ -336,6 +387,43 @@ export component AppWindow inherits Window {
     callback cancel-convert();
     callback convert-preset-selected(int);
 
+    // ---------------- tag
+    in property <[TagGroupRow]> tag-groups;
+    in-out property <int> tag-sel;
+    in-out property <string> tg-artist;
+    in-out property <string> tg-album;
+    in-out property <int> tg-source;
+    in property <[string]> tg-releases;
+    in-out property <int> tg-release-index;
+    in property <[TagFieldRow]> tg-fields;
+    in property <[TagTrackRow]> tg-tracks;
+    in property <image> tg-cur-cover;
+    in property <bool> tg-has-cur-cover;
+    in property <image> tg-new-cover;
+    in property <bool> tg-has-new-cover;
+    in-out property <bool> tg-replace-cover;
+    in property <string> tg-cover-info;
+    in property <bool> tg-busy;
+    in property <string> tg-status;
+    in-out property <bool> tg-rename;
+    in-out property <string> tg-rename-template: "[{track} - ]{title}";
+    callback tag-add-files();
+    callback tag-add-folder();
+    callback tag-clear();
+    callback tag-select(int);
+    callback tag-search();
+    callback tag-release-selected(int);
+    callback tag-field-edited(int, string);
+    callback tag-track-toggled(int, bool);
+    callback tag-track-edited(int, int, string);
+    callback tag-track-all(bool);
+    callback tag-reset();
+    callback tag-choose-cover();
+    callback tag-cover-toggled(bool);
+    callback tag-save();
+    callback tag-auto-all();
+    callback tag-save-all();
+
     // ---------------- presets
     in-out property <int> edit-preset-index;
     in-out property <string> edit-preset-name;
@@ -424,6 +512,7 @@ export component AppWindow inherits Window {
                 }
                 NavItem { icon: "◉"; label: "Rip CD"; active: root.page == 0; clicked => { root.page = 0; } }
                 NavItem { icon: "⇄"; label: "Convert"; active: root.page == 1; clicked => { root.page = 1; } }
+                NavItem { icon: "✎"; label: "Tag"; active: root.page == 4; clicked => { root.page = 4; } }
                 NavItem { icon: "☰"; label: "Presets"; active: root.page == 2; clicked => { root.page = 2; } }
                 NavItem { icon: "⚙"; label: "Settings"; active: root.page == 3; clicked => { root.page = 3; } }
                 Rectangle { vertical-stretch: 1; }
@@ -720,6 +809,195 @@ export component AppWindow inherits Window {
                         }
                         if !root.converting : PrimaryButton { text: "Convert"; enabled: root.files.length > 0; clicked => { root.start-convert(); } }
                         if root.converting : PrimaryButton { text: "Cancel"; danger: true; clicked => { root.cancel-convert(); } }
+                    }
+                }
+            }
+
+            // --------------------------------------------------- TAG
+            if root.page == 4 : VerticalLayout {
+                padding: 24px;
+                spacing: 14px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Heading { text: "Tag"; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: "＋ Add files"; enabled: !root.tg-busy; clicked => { root.tag-add-files(); } }
+                    Button { text: "＋ Add folder"; enabled: !root.tg-busy; clicked => { root.tag-add-folder(); } }
+                    Button { text: "Clear"; enabled: !root.tg-busy && root.tag-groups.length > 0; clicked => { root.tag-clear(); } }
+                    Button { text: "Auto-match all"; enabled: !root.tg-busy && root.tag-groups.length > 0; clicked => { root.tag-auto-all(); } }
+                    PrimaryButton { text: "Save all matched"; enabled: !root.tg-busy && root.tag-groups.length > 0; clicked => { root.tag-save-all(); } }
+                }
+                if root.tag-groups.length == 0 : Card {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        Text { text: "✎"; font-size: 48px; color: Theme.border; horizontal-alignment: center; }
+                        Text { text: "Drag music files or folders here, or use the Add buttons"; color: Theme.muted; horizontal-alignment: center; }
+                        Text { text: "Files are grouped into albums and matched against MusicBrainz and Discogs. You review every change before anything is written."; color: Theme.muted; font-size: 11px; horizontal-alignment: center; wrap: word-wrap; }
+                    }
+                }
+                if root.tag-groups.length > 0 : HorizontalLayout {
+                    vertical-stretch: 1;
+                    spacing: 14px;
+                    // album list
+                    Card {
+                        width: 260px;
+                        VerticalLayout {
+                            padding: 6px;
+                            HorizontalLayout { padding: 8px; Label { text: root.tag-groups.length + (root.tag-groups.length == 1 ? " album" : " albums"); } }
+                            ListView {
+                                for g[i] in root.tag-groups : Rectangle {
+                                    height: 64px;
+                                    border-radius: 8px;
+                                    background: root.tag-sel == i ? Theme.accent.with-alpha(0.14) : gta.has-hover ? Theme.hover : transparent;
+                                    gta := TouchArea { mouse-cursor: pointer; clicked => { root.tag-select(i); } }
+                                    VerticalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        alignment: center;
+                                        spacing: 3px;
+                                        Text { text: g.title; color: Theme.text; font-weight: 600; overflow: elide; }
+                                        Text { text: g.subtitle; color: Theme.muted; font-size: 11px; overflow: elide; }
+                                        HorizontalLayout { alignment: start; StatePill { text: g.status; state: g.state; } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 12px;
+                        // search
+                        Card {
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 8px;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    VerticalLayout { spacing: 3px; horizontal-stretch: 2; Label { text: "Artist"; } LineEdit { text <=> root.tg-artist; enabled: !root.tg-busy; } }
+                                    VerticalLayout { spacing: 3px; horizontal-stretch: 3; Label { text: "Album"; } LineEdit { text <=> root.tg-album; enabled: !root.tg-busy; accepted => { root.tag-search(); } } }
+                                    VerticalLayout { spacing: 3px; width: 150px; Label { text: "Source"; } ComboBox { model: ["All sources", "MusicBrainz", "Discogs"]; current-index <=> root.tg-source; enabled: !root.tg-busy; } }
+                                    VerticalLayout { spacing: 3px; alignment: end; Button { text: root.tg-busy ? "Searching…" : "Search"; enabled: !root.tg-busy; clicked => { root.tag-search(); } } }
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    VerticalLayout {
+                                        spacing: 3px;
+                                        horizontal-stretch: 1;
+                                        Label { text: "Match (" + root.tg-releases.length + " found)"; }
+                                        ComboBox { model: root.tg-releases; current-index <=> root.tg-release-index; enabled: !root.tg-busy && root.tg-releases.length > 0; selected(v) => { root.tag-release-selected(self.current-index); } }
+                                    }
+                                    VerticalLayout { spacing: 3px; alignment: end; Button { text: "Use current tags"; enabled: !root.tg-busy; clicked => { root.tag-reset(); } } }
+                                }
+                            }
+                        }
+                        // album fields: current -> new
+                        Card {
+                            HorizontalLayout {
+                                padding: 12px;
+                                spacing: 16px;
+                                VerticalLayout {
+                                    spacing: 6px;
+                                    alignment: start;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        VerticalLayout {
+                                            spacing: 3px;
+                                            Label { text: "Current"; horizontal-alignment: center; }
+                                            Rectangle {
+                                                width: 96px; height: 96px; border-radius: 8px; clip: true; background: Theme.card-hi;
+                                                if root.tg-has-cur-cover : Image { source: root.tg-cur-cover; width: parent.width; height: parent.height; image-fit: ImageFit.cover; }
+                                                if !root.tg-has-cur-cover : Text { text: "none"; color: Theme.muted; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            spacing: 3px;
+                                            Label { text: "New"; horizontal-alignment: center; }
+                                            Rectangle {
+                                                width: 96px; height: 96px; border-radius: 8px; clip: true; background: Theme.card-hi;
+                                                border-width: root.tg-replace-cover && root.tg-has-new-cover ? 2px : 0px; border-color: Theme.accent;
+                                                if root.tg-has-new-cover : Image { source: root.tg-new-cover; width: parent.width - 4px; height: parent.height - 4px; x: 2px; y: 2px; image-fit: ImageFit.cover; }
+                                                if !root.tg-has-new-cover : Text { text: "Choose…"; color: Theme.muted; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                                                ncta := TouchArea { mouse-cursor: pointer; clicked => { root.tag-choose-cover(); } }
+                                            }
+                                        }
+                                    }
+                                    Tick { text: "Replace artwork"; checked <=> root.tg-replace-cover; enabled: root.tg-has-new-cover; toggled => { root.tag-cover-toggled(self.checked); } }
+                                    Text { text: root.tg-cover-info; color: Theme.muted; font-size: 10px; width: 200px; wrap: word-wrap; }
+                                }
+                                fields-col := VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 4px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Rectangle { width: 92px; }
+                                        Label { text: "Current"; preferred-width: 100px; horizontal-stretch: 1; }
+                                        Label { text: "New (edit freely)"; preferred-width: 100px; horizontal-stretch: 1; }
+                                    }
+                                    for f[i] in root.tg-fields : HorizontalLayout {
+                                        spacing: 8px;
+                                        Text { text: f.label; color: Theme.muted; width: 92px; vertical-alignment: center; font-size: 12px; }
+                                        Text { text: f.current == "" ? "—" : f.current; color: f.changed ? Theme.muted : Theme.text; preferred-width: 100px; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
+                                        DiffEdit { text: f.new; changed: f.changed; preferred-width: 100px; horizontal-stretch: 1; enabled: !root.tg-busy; edited(v) => { root.tag-field-edited(i, v); } }
+                                    }
+                                }
+                            }
+                        }
+                        // tracks: current -> new
+                        Card {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                padding: 6px;
+                                HorizontalLayout {
+                                    padding: 8px;
+                                    spacing: 8px;
+                                    Tick { width: 26px; checked: true; enabled: !root.tg-busy; toggled => { root.tag-track-all(self.checked); } }
+                                    Label { text: "Current file"; horizontal-stretch: 3; preferred-width: 100px; }
+                                    Label { text: "→"; width: 14px; }
+                                    Label { text: "#"; width: 56px; }
+                                    Label { text: "Title"; horizontal-stretch: 3; preferred-width: 100px; }
+                                    Label { text: "Artist"; horizontal-stretch: 2; preferred-width: 100px; }
+                                    Label { text: "Match"; width: 96px; }
+                                }
+                                Rectangle { height: 1px; background: Theme.border; }
+                                ListView {
+                                    for t[i] in root.tg-tracks : Rectangle {
+                                        height: 50px;
+                                        background: !t.apply ? Theme.hover : transparent;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            spacing: 8px;
+                                            Tick { width: 26px; checked: t.apply; enabled: !root.tg-busy; toggled => { root.tag-track-toggled(i, self.checked); } }
+                                            VerticalLayout {
+                                                horizontal-stretch: 3;
+                                                preferred-width: 100px;
+                                                alignment: center;
+                                                Text { text: t.cur-line; color: Theme.text; overflow: elide; font-size: 12px; }
+                                                Text { text: t.cur-sub; color: Theme.muted; overflow: elide; font-size: 10px; }
+                                            }
+                                            Text { text: "→"; width: 14px; color: t.apply ? Theme.accent : Theme.muted; vertical-alignment: center; }
+                                            VerticalLayout { alignment: center; width: 56px; DiffEdit { text: t.num; changed: t.num-changed && t.apply; enabled: !root.tg-busy; edited(v) => { root.tag-track-edited(i, 0, v); } } }
+                                            VerticalLayout { alignment: center; horizontal-stretch: 3; preferred-width: 100px; DiffEdit { text: t.title; changed: t.title-changed && t.apply; enabled: !root.tg-busy; edited(v) => { root.tag-track-edited(i, 1, v); } } }
+                                            VerticalLayout { alignment: center; horizontal-stretch: 2; preferred-width: 100px; DiffEdit { text: t.artist; changed: t.artist-changed && t.apply; enabled: !root.tg-busy; edited(v) => { root.tag-track-edited(i, 2, v); } } }
+                                            VerticalLayout { alignment: center; width: 96px; StatePill { text: t.note; state: t.note-state; } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // footer
+                        Card {
+                            HorizontalLayout {
+                                padding: 12px;
+                                spacing: 12px;
+                                Tick { text: "Rename files to"; checked <=> root.tg-rename; enabled: !root.tg-busy; }
+                                LineEdit { width: 220px; text <=> root.tg-rename-template; enabled: root.tg-rename && !root.tg-busy; }
+                                Text { text: root.tg-status; color: Theme.muted; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; font-size: 12px; }
+                                PrimaryButton { text: "Save album"; enabled: !root.tg-busy; clicked => { root.tag-save(); } }
+                            }
+                        }
                     }
                 }
             }

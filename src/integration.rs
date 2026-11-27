@@ -65,6 +65,7 @@ fn paths() -> Vec<PathBuf> {
         data().join("nautilus/scripts/Coda"),
         conf().join("caja/scripts/Coda"),
         data().join("file-manager/actions/coda-convert.desktop"),
+        data().join("file-manager/actions/coda-tag.desktop"),
     ]
 }
 
@@ -133,8 +134,9 @@ pub fn install(cfg: &Config) -> Result<Vec<String>> {
     // --- KDE Dolphin (Plasma 5 & 6)
     let mut kde = format!(
         "[Desktop Entry]\nType=Service\nX-KDE-ServiceTypes=KonqPopupMenu/Plugin\nMimeType={MIME}\n\
-         X-KDE-Submenu=Coda\nIcon=coda\nActions=dw_open;{}\n\n\
-         [Desktop Action dw_open]\nName=Convert…\nIcon=coda\nExec={q_exe} --convert %F\n",
+         X-KDE-Submenu=Coda\nIcon=coda\nActions=dw_open;dw_tag;{}\n\n\
+         [Desktop Action dw_open]\nName=Convert…\nIcon=coda\nExec={q_exe} --convert %F\n\n\
+         [Desktop Action dw_tag]\nName=Tag…\nIcon=coda\nExec={q_exe} --tag %F\n",
         (0..presets.len()).map(|i| format!("dw_p{i};")).collect::<String>()
     );
     for (i, p) in presets.iter().enumerate() {
@@ -159,6 +161,7 @@ pub fn install(cfg: &Config) -> Result<Vec<String>> {
             )
         };
         write_file(&dir.join("Convert…"), &script("--convert"), true)?;
+        write_file(&dir.join("Tag…"), &script("--tag"), true)?;
         for p in &presets {
             let name = format!("Convert to {}", p.name.replace('/', "-"));
             write_file(&dir.join(name), &script(&format!("convert --preset {}", sh_quote(&p.name))), true)?;
@@ -179,6 +182,7 @@ pub fn install(cfg: &Config) -> Result<Vec<String>> {
         )
     };
     nemo_action("coda-ripper-convert.nemo_action", "Coda: Convert…", "--convert")?;
+    nemo_action("coda-ripper-tag.nemo_action", "Coda: Tag…", "--tag")?;
     for (i, p) in presets.iter().enumerate() {
         nemo_action(&format!("coda-ripper-preset{i}.nemo_action"), &format!("Coda: {}", p.name), &format!("convert --preset {}", exec_quote(&p.name)))?;
     }
@@ -193,6 +197,14 @@ pub fn install(cfg: &Config) -> Result<Vec<String>> {
         ),
         false,
     )?;
+    write_file(
+        &data().join("file-manager/actions/coda-tag.desktop"),
+        &format!(
+            "[Desktop Entry]\nType=Action\nName=Tag with Coda\nIcon=coda\nProfiles=main;\n\n\
+             [X-Action-Profile main]\nMimeTypes={MIME}\nExec={q_exe} --tag %F\n"
+        ),
+        false,
+    )?;
     done.push("PCManFM-Qt / LXQt".into());
 
     // --- Thunar uca.xml (merge, keep the user's own actions)
@@ -200,7 +212,11 @@ pub fn install(cfg: &Config) -> Result<Vec<String>> {
     let mut actions = format!(
         "{THUNAR_MARK}<action><icon>coda</icon><name>Convert with Coda…</name><unique-id>coda-0</unique-id>\
          <command>{} --convert %F</command><description>Coda</description><patterns>*</patterns>\
+         <directories/><audio-files/></action>\n\
+         {THUNAR_MARK}<action><icon>coda</icon><name>Tag with Coda…</name><unique-id>coda-tag</unique-id>\
+         <command>{} --tag %F</command><description>Coda</description><patterns>*</patterns>\
          <directories/><audio-files/></action>\n",
+        xml_escape(&sh_quote(&exe)),
         xml_escape(&sh_quote(&exe))
     );
     for (i, p) in presets.iter().enumerate() {

@@ -12,6 +12,7 @@ mod metadata;
 mod naming;
 mod net;
 mod ripper;
+mod tagger;
 mod tags;
 
 use config::Config;
@@ -26,6 +27,7 @@ const HELP: &str = "Coda – secure CD ripper and audio converter
 USAGE:
   coda                         open the app (Rip CD page)
   coda --convert PATHS...      open the app on the Convert page with files/folders queued
+  coda --tag PATHS...          open the app on the Tag page with files/folders loaded
   coda convert --preset NAME [--naming tags|mirror|beside] [--no-recursive] PATHS...
                                      convert without the GUI (used by the right-click menu)
   coda presets                 list presets
@@ -160,6 +162,7 @@ fn main() {
             0
         }
         Some("--convert") => gui::run(args[1..].iter().map(PathBuf::from).collect(), 1),
+        Some("--tag") => gui::run(args[1..].iter().map(PathBuf::from).collect(), 4),
         Some(_) => {
             // paths passed directly (e.g. "Open With"): audio files go to the converter
             let paths: Vec<PathBuf> = args.iter().map(PathBuf::from).filter(|p| p.exists()).collect();

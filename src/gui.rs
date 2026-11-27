@@ -53,6 +53,8 @@ struct State {
     edit: Preset,
     just_ripped: bool,
     notes: Vec<String>,
+    tag_groups: Vec<crate::tagger::Group>,
+    tag_sel: usize,
     /// Desktop light/dark preference from the XDG settings portal (None = unknown).
     system_dark: Option<bool>,
     logo_px: u32,
@@ -141,10 +143,15 @@ pub fn run(initial: Vec<PathBuf>, page: i32) -> i32 {
     wire_convert(&ui);
     wire_presets(&ui);
     wire_settings(&ui);
+    wire_tagger(&ui);
     init_dnd(&ui);
 
     if !initial.is_empty() {
-        add_paths(&ui, initial);
+        if page == 4 {
+            tag_add_paths(&ui, initial);
+        } else {
+            add_paths(&ui, initial);
+        }
     }
 
     // watch the drive for disc insert/remove
@@ -782,6 +789,10 @@ fn on_drop(ui: &AppWindow, paths: Vec<PathBuf>) {
     }
     ui.set_drop_hover(false);
     if paths.is_empty() {
+        return;
+    }
+    if ui.get_page() == 4 {
+        tag_add_paths(ui, paths);
         return;
     }
     if ui.get_converting() {
@@ -1684,4 +1695,596 @@ fn render_logo(ui: &AppWindow) {
     let buf = SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(img.as_raw(), px, px);
     ui.set_logo(slint::Image::from_rgba8(buf));
     with(|s| s.logo_px = px);
+}
+
+// =================================================================== tagger
+
+use crate::tagger::{self, Group, Status};
+
+fn thumb(bytes: &[u8], px: u32) -> Option<(slint::Image, String)> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let info = format!("{}×{}", img.width(), img.height());
+    let t = img.thumbnail(px, px).to_rgba8();
+    let buf = SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(t.as_raw(), t.width(), t.height());
+    Some((slint::Image::from_rgba8(buf), info))
+}
+
+fn file_name(p: &std::path::Path) -> String {
+    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// Most common non-empty value among the ticked files.
+fn common<F: Fn(&TrackMeta) -> String>(metas: &[TrackMeta], keep: &[bool], f: F) -> String {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (m, k) in metas.iter().zip(keep.iter().chain(std::iter::repeat(&true))) {
+        if *k {
+            let v = f(m);
+            if !v.is_empty() {
+                *counts.entry(v).or_default() += 1;
+            }
+        }
+    }
+    counts.into_iter().max_by_key(|(_, n)| *n).map(|(v, _)| v).unwrap_or_default()
+}
+
+// album-level fields shown in the Current -> New panel
+const TAG_FIELDS: [&str; 6] = ["Album", "Album artist", "Year", "Genre", "Label", "Catalogue no."];
+
+fn field_get(m: &TrackMeta, i: usize) -> String {
+    match i {
+        0 => m.album.clone(),
+        1 => m.album_artist.clone(),
+        2 => m.year.clone(),
+        3 => m.genre.clone(),
+        4 => m.label.clone(),
+        _ => m.catalog.clone(),
+    }
+}
+
+fn field_set(m: &mut TrackMeta, i: usize, v: &str) {
+    let v = v.to_string();
+    match i {
+        0 => m.album = v,
+        1 => m.album_artist = v,
+        2 => m.year = v,
+        3 => m.genre = v,
+        4 => m.label = v,
+        _ => m.catalog = v,
+    }
+}
+
+fn refresh_tag_list(ui: &AppWindow) {
+    let rows: Vec<TagGroupRow> = with(|s| {
+        s.tag_groups
+            .iter()
+            .map(|g| TagGroupRow {
+                title: ss(g.title()),
+                subtitle: ss(format!("{} · {} file{}", if g.artist().is_empty() { "Unknown artist".into() } else { g.artist() }, g.files.len(), if g.files.len() == 1 { "" } else { "s" })),
+                status: ss(g.status.label()),
+                state: g.status.state(),
+            })
+            .collect()
+    });
+    ui.set_tag_groups(ModelRc::new(VecModel::from(rows)));
+    ui.set_tag_sel(with(|s| s.tag_sel) as i32);
+}
+
+/// Push the selected group into the editor panels.
+fn show_group(ui: &AppWindow) {
+    let Some(g) = with(|s| s.tag_groups.get(s.tag_sel).cloned()) else {
+        ui.set_tg_fields(ModelRc::new(VecModel::<TagFieldRow>::default()));
+        ui.set_tg_tracks(ModelRc::new(VecModel::<TagTrackRow>::default()));
+        ui.set_tg_releases(strings(vec![]));
+        return;
+    };
+    ui.set_tg_artist(ss(&g.query_artist));
+    ui.set_tg_album(ss(&g.query_album));
+    ui.set_tg_releases(strings(g.results.iter().map(|r| r.summary())));
+    ui.set_tg_release_index(g.chosen.map(|c| c as i32).unwrap_or(-1));
+    let currents: Vec<TrackMeta> = g.files.iter().map(|f| f.current.clone()).collect();
+    let fields: Vec<TagFieldRow> = TAG_FIELDS
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let cur = common(&currents, &[], |m| field_get(m, i));
+            let new = common(&g.proposed, &g.apply, |m| field_get(m, i));
+            TagFieldRow { label: ss(*label), changed: cur != new, current: ss(cur), new: ss(new) }
+        })
+        .collect();
+    ui.set_tg_fields(ModelRc::new(VecModel::from(fields)));
+    let scored = g.chosen.and_then(|c| g.results.get(c));
+    let tracks: Vec<TagTrackRow> = g
+        .files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let c = &f.current;
+            let p = &g.proposed[i];
+            let num = track_num;
+            let (note, state) = match scored {
+                Some(sc) => match sc.mapping[i] {
+                    Some(_) => {
+                        let fs = sc.file_scores[i];
+                        (format!("✓ {fs}%"), if fs >= 85 { 2 } else { 4 })
+                    }
+                    None => ("No match".to_string(), 4),
+                },
+                None => (if g.status == Status::Saved { "Saved".into() } else { "Manual".into() }, if g.status == Status::Saved { 2 } else { 0 }),
+            };
+            let cur_title = if c.title.is_empty() { file_name(&f.path) } else { c.title.clone() };
+            TagTrackRow {
+                apply: g.apply.get(i).copied().unwrap_or(false),
+                cur_line: ss(if c.track > 0 { format!("{} · {}", num(c), cur_title) } else { cur_title }),
+                cur_sub: ss(format!("{}{}", if c.artist.is_empty() { String::new() } else { format!("{} · ", c.artist) }, file_name(&f.path))),
+                num: ss(num(p)),
+                title: ss(&p.title),
+                artist: ss(&p.artist),
+                num_changed: num(p) != num(c),
+                title_changed: p.title != c.title,
+                artist_changed: p.artist != c.artist,
+                note: ss(note),
+                note_state: state,
+            }
+        })
+        .collect();
+    ui.set_tg_tracks(ModelRc::new(VecModel::from(tracks)));
+    match g.current_cover().and_then(|c| thumb(&c, 192)) {
+        Some((img, _)) => {
+            ui.set_tg_cur_cover(img);
+            ui.set_tg_has_cur_cover(true);
+        }
+        None => ui.set_tg_has_cur_cover(false),
+    }
+    let cur_info = g.current_cover().and_then(|c| thumb(&c, 8)).map(|(_, i)| i);
+    match g.new_cover.as_ref().and_then(|c| thumb(c, 192)) {
+        Some((img, info)) => {
+            ui.set_tg_new_cover(img);
+            ui.set_tg_has_new_cover(true);
+            ui.set_tg_cover_info(ss(format!("Current {} · new {info}", cur_info.unwrap_or_else(|| "none".into()))));
+        }
+        None => {
+            ui.set_tg_has_new_cover(false);
+            ui.set_tg_cover_info(ss(match cur_info {
+                Some(i) => format!("Current artwork {i}"),
+                None => "No artwork yet".into(),
+            }));
+        }
+    }
+    ui.set_tg_replace_cover(g.replace_cover);
+    let ticked = g.apply.iter().filter(|a| **a).count();
+    ui.set_tg_status(ss(match &g.status {
+        Status::Error(e) => e.clone(),
+        st => format!("{} · {ticked} of {} files will be written", st.label(), g.files.len()),
+    }));
+    refresh_tag_list(ui);
+}
+
+fn with_group<R>(f: impl FnOnce(&mut Group) -> R) -> Option<R> {
+    with(|s| {
+        let i = s.tag_sel;
+        s.tag_groups.get_mut(i).map(f)
+    })
+}
+
+fn tag_add_paths(ui: &AppWindow, paths: Vec<PathBuf>) {
+    if ui.get_tg_busy() {
+        toast(ui, "Coda is busy with these albums: add more when it has finished");
+        return;
+    }
+    let (ff, recursive) = (with(|s| s.cfg.settings.ffmpeg.clone()), ui.get_recursive());
+    ui.set_tg_busy(true);
+    ui.set_tg_status(ss("Reading tags…"));
+    ui.set_page(4);
+    let w = ui.as_weak();
+    std::thread::spawn(move || {
+        let groups = tagger::load(&paths, recursive, &ff);
+        let _ = w.upgrade_in_event_loop(move |ui| {
+            ui.set_tg_busy(false);
+            let known: Vec<PathBuf> = with(|s| s.tag_groups.iter().flat_map(|g| g.files.iter().map(|f| f.path.clone())).collect());
+            let fresh: Vec<Group> = groups
+                .into_iter()
+                .filter(|g| g.files.iter().any(|f| !known.contains(&f.path)))
+                .collect();
+            if fresh.is_empty() {
+                toast(&ui, "No new audio files in that selection");
+                show_group(&ui);
+                return;
+            }
+            let n = fresh.len();
+            with(|s| {
+                s.tag_sel = s.tag_groups.len();
+                s.tag_groups.extend(fresh);
+            });
+            show_group(&ui);
+            toast(&ui, format!("Added {n} album{}: press Search, or Auto-match all", if n == 1 { "" } else { "s" }));
+        });
+    });
+}
+
+/// Search + pick the best match + fetch its artwork, for one group (worker thread).
+fn match_group(mut g: Group, artist: String, album: String, source: i32, st: &config::Settings, auto_threshold: Option<u32>) -> Group {
+    g.query_artist = artist.clone();
+    g.query_album = album.clone();
+    match tagger::search(&g.files, &artist, &album, source, st) {
+        Ok(results) if !results.is_empty() => {
+            g.results = results;
+            let best = g.results[0].percent;
+            if auto_threshold.map(|t| best >= t).unwrap_or(true) {
+                tagger::propose(&mut g, 0);
+                fetch_group_cover(&mut g, st);
+            } else {
+                // leave the candidates in the Match list for the user to choose from
+                g.chosen = None;
+                g.status = Status::Review(best);
+            }
+        }
+        Ok(_) => {
+            g.results.clear();
+            g.status = Status::NoMatch;
+        }
+        Err(e) => g.status = Status::Error(format!("{e:#}")),
+    }
+    g
+}
+
+fn fetch_group_cover(g: &mut Group, st: &config::Settings) {
+    let Some(sc) = g.chosen.and_then(|c| g.results.get(c)) else { return };
+    let new = metadata::fetch_cover(&sc.release.album, st);
+    let area = |b: &[u8]| image::ImageReader::new(std::io::Cursor::new(b)).with_guessed_format().ok().and_then(|r| r.into_dimensions().ok()).map(|(w, h)| w as u64 * h as u64).unwrap_or(0);
+    let cur = g.current_cover().map(|c| area(&c)).unwrap_or(0);
+    // replace by default only when it's an upgrade (no art yet, or a bigger image)
+    g.replace_cover = new.as_ref().map(|n| area(n) > cur).unwrap_or(false);
+    g.new_cover = new.map(Arc::new);
+}
+
+fn wire_tagger(ui: &AppWindow) {
+    let pick = |ui: &AppWindow, folders: bool| {
+        let w = ui.as_weak();
+        std::thread::spawn(move || {
+            let picked = if folders {
+                rfd::FileDialog::new().set_title("Add album folders").pick_folders()
+            } else {
+                rfd::FileDialog::new().set_title("Add audio files").add_filter("Audio", formats::INPUT_EXTENSIONS).pick_files()
+            };
+            if let Some(p) = picked {
+                let _ = w.upgrade_in_event_loop(move |ui| tag_add_paths(&ui, p));
+            }
+        });
+    };
+    let w = ui.as_weak();
+    ui.on_tag_add_files(move || pick(&w.unwrap(), false));
+    let w = ui.as_weak();
+    ui.on_tag_add_folder(move || pick(&w.unwrap(), true));
+    let w = ui.as_weak();
+    ui.on_tag_clear(move || {
+        with(|s| {
+            s.tag_groups.clear();
+            s.tag_sel = 0;
+        });
+        let ui = w.unwrap();
+        refresh_tag_list(&ui);
+        show_group(&ui);
+    });
+    let w = ui.as_weak();
+    ui.on_tag_select(move |i| {
+        let ui = w.unwrap();
+        // keep what was typed in the search boxes for the group we're leaving
+        let (a, b) = (ui.get_tg_artist().to_string(), ui.get_tg_album().to_string());
+        with_group(|g| {
+            g.query_artist = a;
+            g.query_album = b;
+        });
+        with(|s| s.tag_sel = (i.max(0) as usize).min(s.tag_groups.len().saturating_sub(1)));
+        show_group(&ui);
+    });
+    let w = ui.as_weak();
+    ui.on_tag_search(move || {
+        let ui = w.unwrap();
+        let Some(g) = with(|s| s.tag_groups.get(s.tag_sel).cloned()) else { return };
+        let (artist, album, source) = (ui.get_tg_artist().to_string(), ui.get_tg_album().to_string(), ui.get_tg_source());
+        let st = with(|s| s.cfg.settings.clone());
+        let sel = with(|s| s.tag_sel);
+        ui.set_tg_busy(true);
+        ui.set_tg_status(ss("Searching… (MusicBrainz allows one request a second, so this takes a few seconds)"));
+        let w = ui.as_weak();
+        std::thread::spawn(move || {
+            let g = match_group(g, artist, album, source, &st, None);
+            let _ = w.upgrade_in_event_loop(move |ui| {
+                ui.set_tg_busy(false);
+                if let Status::Error(e) = &g.status {
+                    toast(&ui, e.clone());
+                } else if g.results.is_empty() {
+                    toast(&ui, "No matching releases: check the artist and album spelling, or try another source");
+                }
+                with(|s| {
+                    if let Some(slot) = s.tag_groups.get_mut(sel) {
+                        *slot = g;
+                    }
+                });
+                show_group(&ui);
+            });
+        });
+    });
+    let w = ui.as_weak();
+    ui.on_tag_release_selected(move |i| {
+        let ui = w.unwrap();
+        let sel = with(|s| s.tag_sel);
+        with_group(|g| tagger::propose(g, i.max(0) as usize));
+        show_group(&ui);
+        let Some(mut g) = with(|s| s.tag_groups.get(sel).cloned()) else { return };
+        let st = with(|s| s.cfg.settings.clone());
+        ui.set_tg_cover_info(ss("Fetching artwork…"));
+        let w = ui.as_weak();
+        std::thread::spawn(move || {
+            fetch_group_cover(&mut g, &st);
+            let _ = w.upgrade_in_event_loop(move |ui| {
+                with(|s| {
+                    if let Some(slot) = s.tag_groups.get_mut(sel) {
+                        // only if the user hasn't picked yet another release meanwhile
+                        if slot.chosen == g.chosen {
+                            slot.new_cover = g.new_cover;
+                            slot.replace_cover = g.replace_cover;
+                        }
+                    }
+                });
+                show_group(&ui);
+            });
+        });
+    });
+    let w = ui.as_weak();
+    ui.on_tag_field_edited(move |i, v| {
+        with_group(|g| {
+            for (k, p) in g.proposed.iter_mut().enumerate() {
+                if g.apply.get(k).copied().unwrap_or(false) {
+                    field_set(p, i as usize, v.as_str());
+                }
+            }
+            if matches!(g.status, Status::New | Status::NoMatch | Status::Review(_) | Status::Saved) {
+                g.status = Status::Edited;
+            }
+        });
+        refresh_after_edit(&w.unwrap());
+    });
+    let w = ui.as_weak();
+    ui.on_tag_track_edited(move |i, field, v| {
+        with_group(|g| {
+            let Some(p) = g.proposed.get_mut(i as usize) else { return };
+            match field {
+                0 => {
+                    // "5" or "2-05" (disc-track)
+                    let (d, t) = match v.split_once('-') {
+                        Some((d, t)) => (d.trim().parse().ok(), t.trim().parse().ok()),
+                        None => (None, v.trim().parse().ok()),
+                    };
+                    if let Some(d) = d {
+                        p.disc = d;
+                    }
+                    p.track = t.unwrap_or(0);
+                }
+                1 => p.title = v.to_string(),
+                _ => p.artist = v.to_string(),
+            }
+            if matches!(g.status, Status::New | Status::NoMatch | Status::Review(_) | Status::Saved) {
+                g.status = Status::Edited;
+            }
+        });
+        refresh_after_edit(&w.unwrap());
+    });
+    let w = ui.as_weak();
+    ui.on_tag_track_toggled(move |i, on| {
+        with_group(|g| {
+            if let Some(a) = g.apply.get_mut(i as usize) {
+                *a = on;
+            }
+        });
+        show_group(&w.unwrap());
+    });
+    let w = ui.as_weak();
+    ui.on_tag_track_all(move |on| {
+        with_group(|g| g.apply.iter_mut().for_each(|a| *a = on));
+        show_group(&w.unwrap());
+    });
+    let w = ui.as_weak();
+    ui.on_tag_reset(move || {
+        with_group(|g| {
+            g.reset_to_current();
+            g.status = Status::New;
+        });
+        show_group(&w.unwrap());
+    });
+    let w = ui.as_weak();
+    ui.on_tag_cover_toggled(move |on| {
+        with_group(|g| g.replace_cover = on);
+        show_group(&w.unwrap());
+    });
+    let w = ui.as_weak();
+    ui.on_tag_choose_cover(move || {
+        let w = w.clone();
+        let max = with(|s| s.cfg.settings.art_max_px);
+        std::thread::spawn(move || {
+            let Some(f) = rfd::FileDialog::new().set_title("Choose album artwork").add_filter("Images", &["jpg", "jpeg", "png"]).pick_file() else { return };
+            let r = std::fs::read(&f).map_err(anyhow::Error::from).and_then(|b| metadata::normalise_art(b, max));
+            let _ = w.upgrade_in_event_loop(move |ui| match r {
+                Ok(b) => {
+                    with_group(|g| {
+                        g.new_cover = Some(Arc::new(b));
+                        g.replace_cover = true;
+                    });
+                    show_group(&ui);
+                }
+                Err(e) => toast(&ui, format!("Could not use that image: {e:#}")),
+            });
+        });
+    });
+    let w = ui.as_weak();
+    ui.on_tag_save(move || {
+        let ui = w.unwrap();
+        let sel = with(|s| s.tag_sel);
+        let Some(g) = with(|s| s.tag_groups.get(sel).cloned()) else { return };
+        if !g.apply.iter().any(|a| *a) {
+            return toast(&ui, "No files are ticked");
+        }
+        save_groups(&ui, vec![(sel, g)]);
+    });
+    let w = ui.as_weak();
+    ui.on_tag_save_all(move || {
+        let ui = w.unwrap();
+        let todo: Vec<(usize, Group)> = with(|s| {
+            s.tag_groups
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| (g.chosen.is_some() || g.status == Status::Edited) && g.status != Status::Saved && g.apply.iter().any(|a| *a))
+                .map(|(i, g)| (i, g.clone()))
+                .collect()
+        });
+        if todo.is_empty() {
+            return toast(&ui, "Nothing to save yet: match or edit some albums first");
+        }
+        save_groups(&ui, todo);
+    });
+    let w = ui.as_weak();
+    ui.on_tag_auto_all(move || {
+        let ui = w.unwrap();
+        let todo: Vec<(usize, Group)> = with(|s| {
+            s.tag_groups
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| g.chosen.is_none() && g.status != Status::Saved)
+                .map(|(i, g)| (i, g.clone()))
+                .collect()
+        });
+        if todo.is_empty() {
+            return toast(&ui, "Every album already has a match");
+        }
+        let st = with(|s| s.cfg.settings.clone());
+        let source = ui.get_tg_source();
+        let total = todo.len();
+        ui.set_tg_busy(true);
+        let w = ui.as_weak();
+        std::thread::spawn(move || {
+            let mut matched = 0;
+            for (n, (idx, mut g)) in todo.into_iter().enumerate() {
+                let w2 = w.clone();
+                let _ = w2.upgrade_in_event_loop(move |ui| {
+                    with(|s| {
+                        if let Some(slot) = s.tag_groups.get_mut(idx) {
+                            slot.status = Status::Searching;
+                        }
+                    });
+                    refresh_tag_list(&ui);
+                    ui.set_tg_status(ss(format!("Matching album {} of {total}…", n + 1)));
+                });
+                let (a, b) = (g.query_artist.clone(), g.query_album.clone());
+                // only accept confident matches automatically; the rest wait for review
+                g = match_group(g, a, b, source, &st, Some(80));
+                if g.chosen.is_some() {
+                    matched += 1;
+                }
+                let _ = w.upgrade_in_event_loop(move |ui| {
+                    with(|s| {
+                        if let Some(slot) = s.tag_groups.get_mut(idx) {
+                            *slot = g;
+                        }
+                    });
+                    show_group(&ui);
+                });
+            }
+            let _ = w.upgrade_in_event_loop(move |ui| {
+                ui.set_tg_busy(false);
+                show_group(&ui);
+                toast(&ui, format!("Matched {matched} of {total} albums. Review them, then Save all matched"));
+            });
+        });
+    });
+}
+
+/// Track number as shown in the editor: "05", or "2-05" on multi-disc albums.
+fn track_num(m: &TrackMeta) -> String {
+    if m.track == 0 {
+        String::new()
+    } else if m.disc_total > 1 && m.disc > 0 {
+        format!("{}-{:02}", m.disc, m.track)
+    } else {
+        format!("{:02}", m.track)
+    }
+}
+
+/// After an edit, write the edited values (not just the highlight flags) back into the
+/// row models. The track list is virtualised: rows scrolled out of view are rebuilt
+/// from the model when they come back, so the model must hold what the user typed.
+/// The text box being typed in keeps its own text, so this doesn't disturb typing.
+fn refresh_after_edit(ui: &AppWindow) {
+    let Some(g) = with(|s| s.tag_groups.get(s.tag_sel).cloned()) else { return };
+    let fields = ui.get_tg_fields();
+    let currents: Vec<TrackMeta> = g.files.iter().map(|f| f.current.clone()).collect();
+    for i in 0..fields.row_count() {
+        if let Some(mut r) = fields.row_data(i) {
+            let cur = common(&currents, &[], |m| field_get(m, i));
+            let new = common(&g.proposed, &g.apply, |m| field_get(m, i));
+            let changed = cur != new;
+            if r.changed != changed || r.new.as_str() != new {
+                r.changed = changed;
+                r.new = ss(new);
+                fields.set_row_data(i, r);
+            }
+        }
+    }
+    let tracks = ui.get_tg_tracks();
+    for i in 0..tracks.row_count() {
+        if let (Some(mut r), Some(p), Some(f)) = (tracks.row_data(i), g.proposed.get(i), g.files.get(i)) {
+            let c = &f.current;
+            let (num, nc, tc, ac) = (track_num(p), track_num(p) != track_num(c), p.title != c.title, p.artist != c.artist);
+            if r.num.as_str() != num || r.title.as_str() != p.title || r.artist.as_str() != p.artist || r.num_changed != nc || r.title_changed != tc || r.artist_changed != ac {
+                r.num = ss(num);
+                r.title = ss(&p.title);
+                r.artist = ss(&p.artist);
+                r.num_changed = nc;
+                r.title_changed = tc;
+                r.artist_changed = ac;
+                tracks.set_row_data(i, r);
+            }
+        }
+    }
+    refresh_tag_list(ui);
+}
+
+fn save_groups(ui: &AppWindow, todo: Vec<(usize, Group)>) {
+    let st = with(|s| s.cfg.settings.clone());
+    let rename = ui.get_tg_rename().then(|| ui.get_tg_rename_template().to_string());
+    ui.set_tg_busy(true);
+    ui.set_tg_status(ss("Writing tags…"));
+    let w = ui.as_weak();
+    std::thread::spawn(move || {
+        let mut written = 0;
+        let mut errors = Vec::new();
+        let mut done = Vec::new();
+        for (idx, mut g) in todo {
+            let (n, e) = tagger::save(&mut g, rename.as_deref(), &st);
+            written += n;
+            errors.extend(e);
+            // after saving, the files' tags are the new baseline
+            g.results.clear();
+            g.chosen = None;
+            let status = g.status.clone();
+            g.reset_to_current();
+            g.status = status;
+            done.push((idx, g));
+        }
+        let _ = w.upgrade_in_event_loop(move |ui| {
+            with(|s| {
+                for (idx, g) in done {
+                    if let Some(slot) = s.tag_groups.get_mut(idx) {
+                        *slot = g;
+                    }
+                }
+            });
+            ui.set_tg_busy(false);
+            show_group(&ui);
+            if errors.is_empty() {
+                toast(&ui, format!("Saved tags to {written} file{}", if written == 1 { "" } else { "s" }));
+            } else {
+                toast(&ui, format!("Saved {written} files; {} failed: {}", errors.len(), errors[0]));
+            }
+        });
+    });
 }

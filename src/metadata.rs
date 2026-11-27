@@ -119,6 +119,7 @@ fn mb_get(url: &str) -> anyhow::Result<Value> {
     let waits = [1500u64, 3000, 5000];
     let mut attempt = 0;
     loop {
+        mb_throttle();
         match net::get_json(url) {
             Err(e) if net::is_transient(&e) && attempt < waits.len() => {
                 std::thread::sleep(std::time::Duration::from_millis(waits[attempt]));
@@ -127,6 +128,129 @@ fn mb_get(url: &str) -> anyhow::Result<Value> {
             r => return r,
         }
     }
+}
+
+/// Keep at least ~1.1 s between MusicBrainz requests across the whole app
+/// (tagging a batch makes many lookups; MusicBrainz asks for at most one per second).
+fn mb_throttle() {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(t) = *last {
+        let gap = Duration::from_millis(1100);
+        let since = t.elapsed();
+        if since < gap {
+            std::thread::sleep(gap - since);
+        }
+    }
+    *last = Some(Instant::now());
+}
+
+/// Album-level fields of a MusicBrainz release (no tracks).
+fn mb_album(r: &Value) -> AlbumCandidate {
+    let media = r.get("media").and_then(|m| m.as_array()).map(|m| m.len()).unwrap_or(1);
+    let (artist, artist_id) = credit(r);
+    let rg = r.get("release-group").cloned().unwrap_or(Value::Null);
+    let li = r.get("label-info").and_then(|l| l.as_array()).and_then(|l| l.first()).cloned().unwrap_or(Value::Null);
+    AlbumCandidate {
+        source: "MusicBrainz".into(),
+        release_id: s(r, "id"),
+        release_group_id: s(&rg, "id"),
+        title: s(r, "title"),
+        artist,
+        artist_id,
+        date: s(r, "date"),
+        country: s(r, "country"),
+        label: li.get("label").map(|l| s(l, "name")).unwrap_or_default(),
+        catalog: s(&li, "catalog-number"),
+        barcode: s(r, "barcode"),
+        genre: top_genre(r).or_else(|| top_genre(&rg)).unwrap_or_default(),
+        disc: 1,
+        disc_total: media.max(1) as u32,
+        ..Default::default()
+    }
+}
+
+fn mb_track(t: &Value, album_artist: &str) -> CandTrack {
+    let rec = t.get("recording").cloned().unwrap_or(Value::Null);
+    let (ta, taid) = credit(t);
+    CandTrack {
+        title: s(t, "title"),
+        artist: if ta.is_empty() { album_artist.to_string() } else { ta },
+        artist_id: taid,
+        recording_id: s(&rec, "id"),
+        track_id: s(t, "id"),
+        isrc: rec.get("isrcs").and_then(|i| i.as_array()).and_then(|i| i.first()).and_then(|i| i.as_str()).unwrap_or_default().to_string(),
+    }
+}
+
+/// One track of a release, with its place and length, for matching files to it.
+#[derive(Debug, Clone, Default)]
+pub struct RelTrack {
+    pub disc: u32,
+    pub number: u32,
+    pub track: CandTrack,
+    pub secs: Option<f64>,
+}
+
+/// A whole release (every disc) from any source, used by the tagger.
+#[derive(Debug, Clone, Default)]
+pub struct ReleaseFull {
+    /// album-level fields; `tracks` is left empty
+    pub album: AlbumCandidate,
+    pub tracks: Vec<RelTrack>,
+}
+
+pub fn mb_release_full(r: &Value) -> ReleaseFull {
+    let album = mb_album(r);
+    let mut tracks = Vec::new();
+    for m in r.get("media").and_then(|m| m.as_array()).into_iter().flatten() {
+        let disc = m.get("position").and_then(|p| p.as_u64()).unwrap_or(1) as u32;
+        for (i, t) in m.get("tracks").and_then(|t| t.as_array()).into_iter().flatten().enumerate() {
+            let ms = t.get("length").and_then(|l| l.as_f64()).or_else(|| t.get("recording").and_then(|r| r.get("length")).and_then(|l| l.as_f64()));
+            tracks.push(RelTrack {
+                disc,
+                number: t.get("position").and_then(|p| p.as_u64()).map(|p| p as u32).unwrap_or(i as u32 + 1),
+                track: mb_track(t, &album.artist),
+                secs: ms.map(|ms| ms / 1000.0),
+            });
+        }
+    }
+    ReleaseFull { album, tracks }
+}
+
+const MB_INC: &str = "artist-credits+recordings+release-groups+labels+isrcs+genres";
+
+/// Full details of one MusicBrainz release.
+pub fn mb_lookup_release(id: &str) -> Result<ReleaseFull> {
+    let v = mb_get(&format!("https://musicbrainz.org/ws/2/release/{id}?inc={MB_INC}&fmt=json"))?;
+    Ok(mb_release_full(&v))
+}
+
+/// Lucene phrase with quotes and backslashes escaped.
+fn lucene(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Release IDs matching an artist/album search, best first.
+pub fn mb_search_releases(artist: &str, album: &str, limit: usize) -> Result<Vec<String>> {
+    if album.trim().is_empty() {
+        bail!("enter an album title to search");
+    }
+    let mut q = format!("release:\"{}\"", lucene(album.trim()));
+    if !artist.trim().is_empty() {
+        q.push_str(&format!(" AND artist:\"{}\"", lucene(artist.trim())));
+    }
+    let v = mb_get(&format!("https://musicbrainz.org/ws/2/release?query={}&limit={limit}&fmt=json", net::urlencode(&q)))?;
+    Ok(v.get("releases")
+        .and_then(|r| r.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|r| r.get("score").and_then(|s| s.as_u64()).unwrap_or(100) >= 60)
+        .map(|r| s(r, "id"))
+        .filter(|id| !id.is_empty())
+        .collect())
 }
 
 pub fn parse_musicbrainz(v: &Value, disc_id: &str, n_tracks: usize) -> Vec<AlbumCandidate> {
@@ -140,47 +264,10 @@ pub fn parse_musicbrainz(v: &Value, disc_id: &str, n_tracks: usize) -> Vec<Album
             .find(|m| m.get("discs").and_then(|d| d.as_array()).map(|d| d.iter().any(|x| s(x, "id") == disc_id)).unwrap_or(false))
             .or_else(|| media.iter().find(|m| m.get("track-count").and_then(|c| c.as_u64()) == Some(n_tracks as u64)));
         let Some(medium) = medium else { continue };
-        let (artist, artist_id) = credit(&r);
-        let rg = r.get("release-group").cloned().unwrap_or(Value::Null);
-        let li = r.get("label-info").and_then(|l| l.as_array()).and_then(|l| l.first()).cloned().unwrap_or(Value::Null);
-        let tracks = medium
-            .get("tracks")
-            .and_then(|t| t.as_array())
-            .map(|ts| {
-                ts.iter()
-                    .map(|t| {
-                        let rec = t.get("recording").cloned().unwrap_or(Value::Null);
-                        let (ta, taid) = credit(t);
-                        CandTrack {
-                            title: s(t, "title"),
-                            artist: if ta.is_empty() { artist.clone() } else { ta },
-                            artist_id: taid,
-                            recording_id: s(&rec, "id"),
-                            track_id: s(t, "id"),
-                            isrc: rec.get("isrcs").and_then(|i| i.as_array()).and_then(|i| i.first()).and_then(|i| i.as_str()).unwrap_or_default().to_string(),
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.push(AlbumCandidate {
-            source: "MusicBrainz".into(),
-            release_id: s(&r, "id"),
-            release_group_id: s(&rg, "id"),
-            title: s(&r, "title"),
-            artist,
-            artist_id,
-            date: s(&r, "date"),
-            country: s(&r, "country"),
-            label: li.get("label").map(|l| s(l, "name")).unwrap_or_default(),
-            catalog: s(&li, "catalog-number"),
-            barcode: s(&r, "barcode"),
-            genre: top_genre(&r).or_else(|| top_genre(&rg)).unwrap_or_default(),
-            disc: medium.get("position").and_then(|p| p.as_u64()).unwrap_or(1) as u32,
-            disc_total: media.len().max(1) as u32,
-            tracks,
-            ..Default::default()
-        });
+        let mut c = mb_album(&r);
+        c.disc = medium.get("position").and_then(|p| p.as_u64()).unwrap_or(1) as u32;
+        c.tracks = medium.get("tracks").and_then(|t| t.as_array()).map(|ts| ts.iter().map(|t| mb_track(t, &c.artist)).collect()).unwrap_or_default();
+        out.push(c);
     }
     out
 }

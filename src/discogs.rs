@@ -5,7 +5,7 @@
 //! release must have a disc with the same number of tracks, and candidates are
 //! ranked by how closely their track lengths match the TOC.
 
-use crate::metadata::{AlbumCandidate, CandTrack};
+use crate::metadata::{AlbumCandidate, CandTrack, RelTrack, ReleaseFull};
 use crate::net;
 use anyhow::{bail, Result};
 use serde_json::Value;
@@ -278,6 +278,16 @@ mod tests {
     }
 
     #[test]
+    fn full_release_numbers_tracks_per_disc() {
+        let r = release_full(&release());
+        assert_eq!(r.album.disc_total, 2);
+        let pos: Vec<(u32, u32)> = r.tracks.iter().map(|t| (t.disc, t.number)).collect();
+        assert_eq!(pos, vec![(1, 1), (1, 2), (2, 1), (2, 2)]);
+        assert_eq!(r.tracks[2].secs, Some(301.0));
+        assert_eq!(r.album.discogs_id, "12345");
+    }
+
+    #[test]
     fn rejects_wrong_edition() {
         // right track count, but lengths a minute out: a different edition
         assert!(candidate_from_release(&release(), &[240.0, 240.0]).is_none());
@@ -309,3 +319,79 @@ mod tests {
         assert_eq!(clean_name("Band (UK)"), "Band (UK)");
     }
 }
+
+/// The whole release (all discs, with lengths) for the tagger.
+pub fn release_full(rel: &Value) -> ReleaseFull {
+    let artist = artists(rel);
+    let all = tracks(rel, &artist);
+    let mut per_disc: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    let rel_tracks: Vec<RelTrack> = all
+        .into_iter()
+        .map(|t| {
+            let n = per_disc.entry(t.disc).or_insert(0);
+            *n += 1;
+            RelTrack { disc: t.disc, number: *n, track: t.track, secs: t.secs }
+        })
+        .collect();
+    let label = rel.get("labels").and_then(|l| l.as_array()).and_then(|l| l.first()).cloned().unwrap_or(Value::Null);
+    let first = |k: &str| rel.get(k).and_then(|x| x.as_array()).and_then(|x| x.first()).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let style = first("styles");
+    let images = rel.get("images").and_then(|i| i.as_array()).cloned().unwrap_or_default();
+    let date = {
+        let r = s(rel, "released");
+        if r.is_empty() || r.starts_with('0') {
+            rel.get("year").and_then(|y| y.as_u64()).filter(|y| *y > 0).map(|y| y.to_string()).unwrap_or_default()
+        } else {
+            r.trim_end_matches("-00").to_string()
+        }
+    };
+    let album = AlbumCandidate {
+        source: "Discogs".into(),
+        discogs_id: rel.get("id").and_then(|i| i.as_u64()).map(|i| i.to_string()).unwrap_or_default(),
+        title: s(rel, "title"),
+        artist,
+        date,
+        country: s(rel, "country"),
+        label: label.get("name").and_then(|n| n.as_str()).map(clean_name).unwrap_or_default(),
+        catalog: s(&label, "catno").replace("none", ""),
+        barcode: rel
+            .get("identifiers")
+            .and_then(|i| i.as_array())
+            .and_then(|ids| ids.iter().find(|i| s(i, "type") == "Barcode"))
+            .map(|i| s(i, "value").chars().filter(|c| c.is_ascii_digit()).collect())
+            .unwrap_or_default(),
+        genre: if style.is_empty() { first("genres") } else { style },
+        disc: 1,
+        disc_total: rel_tracks.iter().map(|t| t.disc).max().unwrap_or(1),
+        cover_url: images.iter().find(|i| s(i, "type") == "primary").or(images.first()).map(|i| s(i, "uri")).unwrap_or_default(),
+        ..Default::default()
+    };
+    ReleaseFull { album, tracks: rel_tracks }
+}
+
+/// Search by artist/album and return full releases (no TOC filtering; the tagger
+/// scores them against the files).
+pub fn search_full(artist: &str, album: &str, token: &str, limit: usize) -> Result<Vec<ReleaseFull>> {
+    if album.trim().is_empty() {
+        bail!("enter an album title to search");
+    }
+    let mut f = format!("release_title={}", net::urlencode(album.trim()));
+    if !artist.trim().is_empty() {
+        f.push_str(&format!("&artist={}", net::urlencode(artist.trim())));
+    }
+    let api = api();
+    let results = get(&format!("{api}/database/search?type=release&per_page=25&{f}"), token)?
+        .get("results")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for r in results.iter().take(limit) {
+        let Some(id) = r.get("id").and_then(|i| i.as_u64()) else { continue };
+        if let Ok(rel) = get(&format!("{api}/releases/{id}"), token) {
+            out.push(release_full(&rel));
+        }
+    }
+    Ok(out)
+}
+

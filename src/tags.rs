@@ -243,3 +243,279 @@ pub fn write(path: &Path, format: Format, meta: &TrackMeta) -> Result<()> {
     }
     Ok(())
 }
+
+// =================================================================== in-place update (tagger)
+
+/// Fields Coda manages when re-tagging. Everything else in the file (ReplayGain,
+/// lyrics, comments, custom fields, other pictures) is preserved.
+fn apply_fields(tag: &mut Tag, m: &TrackMeta, cover: Option<&[u8]>) {
+    // core fields: set, or remove when cleared
+    for (k, v) in [
+        (ItemKey::TrackTitle, &m.title),
+        (ItemKey::TrackArtist, &m.artist),
+        (ItemKey::AlbumTitle, &m.album),
+        (ItemKey::AlbumArtist, &m.album_artist),
+        (ItemKey::Genre, &m.genre),
+        (ItemKey::RecordingDate, &m.year),
+        (ItemKey::Composer, &m.composer),
+    ] {
+        if v.trim().is_empty() {
+            tag.remove_key(k);
+        } else {
+            tag.insert_text(k, v.trim().to_string());
+        }
+    }
+    if !m.year.trim().is_empty() {
+        tag.remove_key(ItemKey::Year); // avoid a stale second date field
+    }
+    for (n, set, remove) in [
+        (m.track, Tag::set_track as fn(&mut Tag, u32), Tag::remove_track as fn(&mut Tag)),
+        (m.track_total, Tag::set_track_total, Tag::remove_track_total),
+        (m.disc, Tag::set_disk, Tag::remove_disk),
+        (m.disc_total, Tag::set_disk_total, Tag::remove_disk_total),
+    ] {
+        if n > 0 {
+            set(tag, n);
+        } else {
+            remove(tag);
+        }
+    }
+    // identifiers and release details: only ever added or updated, never removed
+    for (k, v) in [
+        (ItemKey::Isrc, &m.isrc),
+        (ItemKey::Label, &m.label),
+        (ItemKey::CatalogNumber, &m.catalog),
+        (ItemKey::Barcode, &m.barcode),
+        (ItemKey::MusicBrainzReleaseId, &m.mb_release_id),
+        (ItemKey::MusicBrainzRecordingId, &m.mb_recording_id),
+        (ItemKey::MusicBrainzTrackId, &m.mb_track_id),
+        (ItemKey::MusicBrainzReleaseGroupId, &m.mb_release_group_id),
+        (ItemKey::MusicBrainzArtistId, &m.mb_artist_id),
+        (ItemKey::MusicBrainzReleaseArtistId, &m.mb_album_artist_id),
+    ] {
+        if !v.is_empty() {
+            tag.insert_text(k, v.clone());
+        }
+    }
+    if let Some(c) = cover {
+        // M4A (and some taggers elsewhere) store covers untyped, so treat "Other" as the front cover too
+        tag.remove_picture_type(PictureType::CoverFront);
+        tag.remove_picture_type(PictureType::Other);
+        tag.push_picture(front_picture(c));
+    }
+}
+
+fn front_picture(c: &[u8]) -> Picture {
+    let mime = if c.starts_with(&[0x89, b'P', b'N', b'G']) { MimeType::Png } else { MimeType::Jpeg };
+    Picture::unchecked(c.to_vec()).pic_type(PictureType::CoverFront).mime_type(mime).build()
+}
+
+/// Normalises lofty getters that return `Option<&T>` (optional tags) or `&T`
+/// (tags every file of that type has, like Ogg's Vorbis comments).
+trait OptTag<T> {
+    fn get_or_default(self) -> T;
+}
+impl<T: Clone + Default> OptTag<T> for Option<&T> {
+    fn get_or_default(self) -> T {
+        self.cloned().unwrap_or_default()
+    }
+}
+impl<T: Clone> OptTag<T> for &T {
+    fn get_or_default(self) -> T {
+        self.clone()
+    }
+}
+
+/// Update tags in place. `cover = Some(..)` replaces the front cover; `None` keeps
+/// whatever artwork the file has.
+pub fn update(path: &Path, m: &TrackMeta, cover: Option<&[u8]>, ffmpeg: &str) -> Result<()> {
+    use lofty::config::ParseOptions;
+    use lofty::file::FileType;
+    use lofty::tag::{MergeTag, SplitTag};
+
+    let ft = lofty::probe::Probe::open(path).ok().and_then(|p| p.guess_file_type().ok()).and_then(|p| p.file_type());
+    let open_rw = || std::fs::OpenOptions::new().read(true).write(true).open(path).with_context(|| format!("opening {}", path.display()));
+
+    // read the concrete file, split its tag into (unmanaged remainder, generic), edit
+    // the generic part, merge back and save: unmanaged items survive untouched.
+    macro_rules! via {
+        ($file:ty, $get:ident, $set:ident, $tag:ty, $cover:expr, $post:expr) => {{
+            let mut f = <$file>::read_from(&mut std::fs::File::open(path)?, ParseOptions::new())?;
+            let existing: $tag = OptTag::get_or_default(f.$get());
+            let (rem, mut generic) = existing.split_tag();
+            apply_fields(&mut generic, m, $cover);
+            let mut merged: $tag = rem.merge_tag(generic);
+            #[allow(clippy::redundant_closure_call)]
+            ($post)(&mut merged);
+            f.$set(merged);
+            f.save_to(&mut open_rw()?, WriteOptions::default())?;
+            Ok(())
+        }};
+    }
+    type Vc = lofty::ogg::tag::VorbisComments;
+    type Id3 = lofty::id3::v2::Id3v2Tag;
+    let discogs = |vc: &mut Vc| {
+        if !m.discogs_release_id.is_empty() {
+            vc.insert("DISCOGS_RELEASE_ID".to_string(), m.discogs_release_id.clone());
+        }
+    };
+    let none_id3 = |_: &mut Id3| {};
+    match ft {
+        Some(FileType::Flac) => {
+            // FLAC keeps pictures in their own blocks, outside the Vorbis comment
+            let mut f = lofty::flac::FlacFile::read_from(&mut std::fs::File::open(path)?, ParseOptions::new())?;
+            let existing = f.vorbis_comments().cloned().unwrap_or_default();
+            let (rem, mut generic) = existing.split_tag();
+            apply_fields(&mut generic, m, None);
+            let mut merged: Vc = rem.merge_tag(generic);
+            discogs(&mut merged);
+            f.set_vorbis_comments(merged);
+            if let Some(c) = cover {
+                use lofty::ogg::OggPictureStorage;
+                f.remove_picture_type(PictureType::CoverFront);
+                let pic = front_picture(c);
+                let info = lofty::picture::PictureInformation::from_picture(&pic).unwrap_or_default();
+                f.insert_picture(pic, Some(info))?;
+            }
+            f.save_to(&mut open_rw()?, WriteOptions::default())?;
+            Ok(())
+        }
+        Some(FileType::Opus) => via!(lofty::ogg::OpusFile, vorbis_comments, set_vorbis_comments, Vc, cover, discogs),
+        Some(FileType::Vorbis) => via!(lofty::ogg::VorbisFile, vorbis_comments, set_vorbis_comments, Vc, cover, discogs),
+        Some(FileType::Speex) => via!(lofty::ogg::SpeexFile, vorbis_comments, set_vorbis_comments, Vc, cover, discogs),
+        Some(FileType::Mpeg) => via!(lofty::mpeg::MpegFile, id3v2, set_id3v2, Id3, cover, none_id3),
+        Some(FileType::Wav) => via!(lofty::iff::wav::WavFile, id3v2, set_id3v2, Id3, cover, none_id3),
+        Some(FileType::Aiff) => via!(lofty::iff::aiff::AiffFile, id3v2, set_id3v2, Id3, cover, none_id3),
+        Some(FileType::Aac) => via!(lofty::aac::AacFile, id3v2, set_id3v2, Id3, cover, none_id3),
+        Some(FileType::Mp4) => via!(lofty::mp4::Mp4File, ilst, set_ilst, lofty::mp4::Ilst, cover, |_: &mut lofty::mp4::Ilst| {}),
+        Some(FileType::Ape) => via!(lofty::ape::ApeFile, ape, set_ape, lofty::ape::ApeTag, cover, |_: &mut lofty::ape::ApeTag| {}),
+        Some(FileType::WavPack) => via!(lofty::wavpack::WavPackFile, ape, set_ape, lofty::ape::ApeTag, cover, |_: &mut lofty::ape::ApeTag| {}),
+        Some(FileType::Mpc) => via!(lofty::musepack::MpcFile, ape, set_ape, lofty::ape::ApeTag, cover, |_: &mut lofty::ape::ApeTag| {}),
+        _ => update_ffmpeg(path, m, cover, ffmpeg),
+    }
+}
+
+/// WMA, TTA, Matroska and others lofty can't write: remux with ffmpeg (stream copy,
+/// no re-encoding), keeping existing metadata and overriding the managed keys.
+fn update_ffmpeg(path: &Path, m: &TrackMeta, cover: Option<&[u8]>, ffmpeg: &str) -> Result<()> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("tmp");
+    let tmp = path.with_file_name(format!(".{}.coda-tag.{ext}", path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()));
+    let cover_tmp = cover.map(|c| {
+        let p = path.with_file_name(".coda-cover.jpg");
+        let _ = std::fs::write(&p, c);
+        p
+    });
+    let mut cmd = std::process::Command::new(ffmpeg);
+    cmd.args(["-hide_banner", "-nostdin", "-y", "-v", "error", "-i"]).arg(path);
+    if let Some(c) = &cover_tmp {
+        cmd.arg("-i").arg(c).args(["-map", "0:a", "-map", "1:v", "-c", "copy", "-disposition:v", "attached_pic"]);
+    } else {
+        cmd.args(["-map", "0", "-c", "copy"]);
+    }
+    cmd.args(["-map_metadata", "0"]);
+    let mut kv = |k: &str, v: String| {
+        cmd.arg("-metadata").arg(format!("{k}={v}"));
+    };
+    kv("title", m.title.clone());
+    kv("artist", m.artist.clone());
+    kv("album", m.album.clone());
+    kv("album_artist", m.album_artist.clone());
+    kv("genre", m.genre.clone());
+    kv("date", m.year.clone());
+    kv("composer", m.composer.clone());
+    kv("track", if m.track == 0 { String::new() } else if m.track_total > 0 { format!("{}/{}", m.track, m.track_total) } else { m.track.to_string() });
+    kv("disc", if m.disc == 0 { String::new() } else if m.disc_total > 0 { format!("{}/{}", m.disc, m.disc_total) } else { m.disc.to_string() });
+    let out = cmd.arg(&tmp).output().context("running ffmpeg")?;
+    if let Some(c) = cover_tmp {
+        let _ = std::fs::remove_file(c);
+    }
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::bail!("ffmpeg could not rewrite the tags: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or(""));
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn ffprobe_all(p: &Path) -> String {
+        let o = Command::new("ffprobe").args(["-v", "error", "-show_entries", "format_tags:stream_tags:stream=codec_type", "-of", "flat"]).arg(p).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).to_lowercase()
+    }
+
+    /// Re-tagging changes managed fields only: a custom field and the artwork survive.
+    #[test]
+    #[ignore] // needs ffmpeg; run with --ignored
+    fn retag_preserves_unmanaged_data() {
+        let dir = std::env::temp_dir().join(format!("coda-retag-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cover = dir.join("c.jpg");
+        Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=red:size=64x64", "-frames:v", "1"]).arg(&cover).status().unwrap();
+        let cover_bytes = std::fs::read(&cover).unwrap();
+        let blue = dir.join("b.jpg");
+        Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=blue:size=80x80", "-frames:v", "1"]).arg(&blue).status().unwrap();
+        let blue_bytes = std::fs::read(&blue).unwrap();
+        let cases: &[(&str, &[&str], Format)] = &[
+            ("flac", &["-c:a", "flac"], Format::Flac),
+            ("mp3", &["-c:a", "libmp3lame", "-id3v2_version", "3"], Format::Mp3),
+            ("m4a", &["-c:a", "aac"], Format::Aac),
+            ("opus", &["-c:a", "libopus"], Format::Opus),
+            ("ogg", &["-c:a", "libvorbis"], Format::Vorbis),
+            ("wv", &["-c:a", "wavpack"], Format::WavPack),
+            ("aiff", &["-c:a", "pcm_s16be", "-write_id3v2", "1"], Format::Aiff),
+            ("wma", &["-c:a", "wmav2"], Format::Wma),
+        ];
+        let mut failures = Vec::new();
+        for (ext, args, fmt) in cases {
+            let p = dir.join(format!("t.{ext}"));
+            let st = Command::new("ffmpeg")
+                .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=d=1", "-ac", "2"])
+                .args(*args)
+                .args(["-metadata", "title=Old Title", "-metadata", "codakeep=preserve-me"])
+                .arg(&p)
+                .status()
+                .unwrap();
+            assert!(st.success(), "{ext}");
+            if *ext == "m4a" {
+                // custom M4A fields are iTunes freeform atoms (what Picard, Mp3tag and iTunes write)
+                use lofty::mp4::{Atom, AtomData, AtomIdent, Ilst, Mp4File};
+                let mut f = Mp4File::read_from(&mut std::fs::File::open(&p).unwrap(), lofty::config::ParseOptions::new()).unwrap();
+                let mut ilst: Ilst = f.ilst().cloned().unwrap_or_default();
+                ilst.insert(Atom::new(
+                    AtomIdent::Freeform { mean: "com.apple.iTunes".into(), name: "CODAKEEP".into() },
+                    AtomData::UTF8("preserve-me".into()),
+                ));
+                f.set_ilst(ilst);
+                f.save_to(&mut std::fs::OpenOptions::new().read(true).write(true).open(&p).unwrap(), WriteOptions::default()).unwrap();
+            }
+            let had_custom = ffprobe_all(&p).contains("preserve-me");
+            // add artwork through the update path itself: the custom field must survive this too
+            let base = TrackMeta { title: "Old Title".into(), ..Default::default() };
+            update(&p, &base, Some(&cover_bytes), "ffmpeg").unwrap();
+            let custom_after_cover = ffprobe_all(&p).contains("preserve-me");
+
+            // 1) change title, keep cover
+            let mut new = TrackMeta { title: "New Title".into(), artist: "Someone".into(), track: 3, track_total: 9, ..Default::default() };
+            new.album = "Album".into();
+            update(&p, &new, None, "ffmpeg").unwrap();
+            let after = read(&p);
+            let probe = ffprobe_all(&p);
+            let title_ok = probe.contains("new title");
+            let custom_ok = had_custom && custom_after_cover && probe.contains("preserve-me");
+            let cover_kept = after.cover.as_ref().map(|c| c.len()).unwrap_or(0) > 0 || probe.contains("codec_type=\"video\"");
+            // 2) replace cover
+            update(&p, &new, Some(&blue_bytes), "ffmpeg").unwrap();
+            let replaced = read(&p).cover.map(|c| c.as_slice() == blue_bytes.as_slice()).unwrap_or(!fmt.lofty_taggable());
+            println!("{ext:5} title:{title_ok} custom-field:{custom_ok} (present before: {had_custom}) cover-kept:{cover_kept} cover-replaced:{replaced}");
+            if !(title_ok && custom_ok && cover_kept && replaced) {
+                failures.push(*ext);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(failures.is_empty(), "failed: {failures:?}");
+    }
+}
